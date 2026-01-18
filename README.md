@@ -163,104 +163,6 @@ fig = love_plot(stratified_df, sample_frac=0.1)
 display(fig)  # Databricks display function
 ```
 
-### AWS EMR / Jupyter Notebook Example
-
-```python
-# spark is typically available via %%configure magic or SparkSession.getActiveSession()
-from brpmatch import generate_features, match, stratify_for_plot, love_plot
-
-# Get existing session if needed
-# spark = SparkSession.getActiveSession()
-
-# Read from S3
-df = spark.read.parquet("s3://my-bucket/cohort-data/")
-
-# Run matching pipeline
-features_df = generate_features(
-    spark,
-    df,
-    categorical_cols=["region", "diagnosis"],
-    numeric_cols=["age", "lab_value"],
-    treatment_col="arm",
-    treatment_value="1",
-)
-
-matched_df = match(features_df)
-stratified_df = stratify_for_plot(features_df, matched_df)
-
-# Save plot to S3
-fig = love_plot(stratified_df)
-fig.savefig("/tmp/balance.png")
-# Then copy to S3 using boto3 or aws cli
-```
-
-### Palantir Foundry Example
-
-BRPMatch was originally developed for Foundry! Here's how to use the refactored version:
-
-```python
-from transforms.api import transform_df, Input, Output
-from brpmatch import generate_features, match, stratify_for_plot, love_plot
-
-@transform_df(
-    Output("ri.foundry.main.dataset.matched-cohorts"),
-    patients=Input("ri.foundry.main.dataset.patient-data"),
-)
-def compute_matches(patients):
-    # Use the spark session from the transform context
-    from pyspark.sql import SparkSession
-    spark = SparkSession.getActiveSession()
-
-    features_df = generate_features(
-        spark,
-        patients,
-        categorical_cols=["state", "smoker"],
-        numeric_cols=["age", "bmi"],
-        treatment_col="cohort",
-        treatment_value="treated",
-    )
-
-    matched_df = match(features_df)
-    return matched_df
-
-
-@transform_df(
-    Output("ri.foundry.main.dataset.balance-stats"),
-    features=Input("ri.foundry.main.dataset.patient-data"),
-    matches=Input("ri.foundry.main.dataset.matched-cohorts"),
-)
-def create_balance_plot(features, matches):
-    from pyspark.sql import SparkSession
-    spark = SparkSession.getActiveSession()
-
-    # Regenerate features (or read from a cached dataset)
-    features_df = generate_features(
-        spark,
-        features,
-        categorical_cols=["state", "smoker"],
-        numeric_cols=["age", "bmi"],
-        treatment_col="cohort",
-        treatment_value="treated",
-    )
-
-    stratified_df = stratify_for_plot(features_df, matches)
-
-    # For visualization, save plot to a Foundry dataset or export
-    # Note: Foundry doesn't directly support matplotlib figures in datasets
-    # You'll need to either:
-    # 1. Save to a temporary location and upload as a resource
-    # 2. Return the stratified_df and create the plot in a notebook
-    return stratified_df
-```
-
-### Key Points for Managed Environments
-
-1. **No SparkSession configuration needed** - Use the existing session
-2. **Data location flexibility** - Read from tables, S3, HDFS, etc.
-3. **Scalability** - BRPMatch leverages your cluster's resources automatically
-4. **Memory management** - Use `sample_frac` in `love_plot()` for very large datasets
-5. **Checkpointing** - Save intermediate results (features_df, matched_df) to avoid recomputation
-
 ### Performance Tips
 
 For large datasets (>10M rows):
@@ -416,10 +318,8 @@ All installed automatically with `pip install brpmatch`:
 - pandas >= 1.3
 - matplotlib >= 3.5
 
-### No Spark Cluster Required
-BRPMatch works out-of-the-box on your local machine. PySpark includes everything needed to run Spark in local mode.
+**Note for Java 17+**: When using Java 17 or newer (for local examples and development), add these configuration options to your SparkSession; PySpark uses them for certain operations and they are disabled by default in newer Java:
 
-**Note for Java 17+**: When using Java 17 or newer, add these configuration options to your SparkSession:
 ```python
 .config("spark.driver.extraJavaOptions", "-Djava.security.manager=allow")
 .config("spark.executor.extraJavaOptions", "-Djava.security.manager=allow")
