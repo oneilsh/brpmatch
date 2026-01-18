@@ -44,7 +44,7 @@ build:
 	poetry run python -m build
 
 check:
-	poetry run twine check dist/*
+	poetry run twine check dist/*.whl dist/*.tar.gz
 
 publish-test: build check
 	@echo "Publishing to TestPyPI..."

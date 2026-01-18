@@ -27,13 +27,19 @@ poetry install
 
 ## Quick Start
 
+### Running Locally (No Cluster Needed!)
+
+The `pyspark` package includes everything needed to run Spark on your local machine. No separate cluster or driver VM required!
+
 ```python
 from pyspark.sql import SparkSession
 from brpmatch import generate_features, match, stratify_for_plot, love_plot
 
-# Create Spark session (with Java 17+ compatibility)
+# Create a local Spark session (runs on your machine)
+# .master("local[*]") uses all available CPU cores locally
 spark = (
     SparkSession.builder
+    .master("local[*]")  # Local mode - no cluster needed!
     .appName("matching")
     .config("spark.driver.extraJavaOptions", "-Djava.security.manager=allow")
     .config("spark.executor.extraJavaOptions", "-Djava.security.manager=allow")
@@ -75,6 +81,52 @@ fig = love_plot(
 )
 fig.savefig("balance.png")
 ```
+
+## Understanding Spark Modes
+
+BRPMatch works in both **local mode** (single machine) and **cluster mode** (distributed):
+
+### Local Mode (Development/Testing)
+**You already have this!** Installing `pyspark` includes a complete Spark installation.
+
+```python
+# Runs on your laptop/workstation
+spark = SparkSession.builder.master("local[*]").getOrCreate()
+```
+
+- ✓ No cluster setup required
+- ✓ Uses your machine's CPU cores for parallelism
+- ✓ Perfect for development, testing, small datasets (<100K rows)
+- ✓ Same API as cluster mode
+
+**What `.master("local[*]")` means:**
+- `local` = Run Spark locally (not on a cluster)
+- `*` = Use all available CPU cores
+- `local[4]` = Use exactly 4 cores
+
+### Cluster Mode (Production/Large Datasets)
+
+For large-scale matching (millions of patients), connect to an existing Spark cluster:
+
+```python
+# Databricks - spark is already configured
+spark  # Just use the global spark variable
+
+# AWS EMR / standalone cluster
+spark = SparkSession.builder.master("spark://master-node:7077").getOrCreate()
+
+# YARN cluster
+spark = SparkSession.builder.master("yarn").getOrCreate()
+
+# Kubernetes
+spark = SparkSession.builder.master("k8s://https://k8s-master:443").getOrCreate()
+```
+
+**When to use cluster mode:**
+- Datasets with >1M patients
+- Complex features requiring significant computation
+- Production pipelines
+- Need for horizontal scaling
 
 ## Usage in Managed Spark Environments
 
@@ -348,15 +400,24 @@ Both statistics are computed before (unadjusted) and after (adjusted) matching.
 
 ## Requirements
 
-- Python >= 3.10
-- Java 11+ (for PySpark)
-- PySpark >= 3.3
-- PyArrow >= 15.0
+### Software
+- **Python** >= 3.10
+- **Java** >= 11 (required by PySpark - check with `java -version`)
+  - PySpark needs Java to run, even in local mode
+  - If you don't have Java: `brew install openjdk` (Mac) or download from [Adoptium](https://adoptium.net/)
+
+### Python Packages
+All installed automatically with `pip install brpmatch`:
+- PySpark >= 3.3 (includes Spark binaries - no separate Spark installation needed!)
+- PyArrow >= 15.0 (required for Pandas UDFs)
 - NumPy >= 1.21
 - SciPy >= 1.7
 - scikit-learn >= 1.0
 - pandas >= 1.3
 - matplotlib >= 3.5
+
+### No Spark Cluster Required
+BRPMatch works out-of-the-box on your local machine. PySpark includes everything needed to run Spark in local mode.
 
 **Note for Java 17+**: When using Java 17 or newer, add these configuration options to your SparkSession:
 ```python
