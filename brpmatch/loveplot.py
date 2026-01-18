@@ -1,0 +1,226 @@
+"""
+Love plot visualization for BRPMatch covariate balance.
+
+This module generates love plots showing covariate balance before and after matching.
+"""
+
+from typing import List, Optional, Tuple
+
+import matplotlib.figure
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from pyspark.sql import DataFrame
+
+
+def love_plot(
+    stratified_df: DataFrame,
+    treatment_col: str = "treat",
+    strata_col: str = "strata",
+    categorical_suffix: str = "_index",
+    numeric_suffix: str = "_imputed",
+    sample_frac: float = 0.05,
+    figsize: Tuple[int, int] = (10, 12),
+    feature_cols: Optional[List[str]] = None,
+) -> matplotlib.figure.Figure:
+    """
+    Generate a love plot showing covariate balance before and after matching.
+
+    Parameters
+    ----------
+    stratified_df : DataFrame
+        Output from stratify_for_plot()
+    treatment_col : str
+        Column indicating treatment (1) vs control (0)
+    strata_col : str
+        Column identifying matched pairs
+    categorical_suffix : str
+        Suffix identifying categorical feature columns
+    numeric_suffix : str
+        Suffix identifying numeric feature columns
+    sample_frac : float
+        Fraction of data to sample for plotting (for large datasets)
+    figsize : Tuple[int, int]
+        Figure size (width, height) in inches
+    feature_cols : Optional[List[str]]
+        Specific columns to include. If None, auto-detect by suffix.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Love plot figure with two panels:
+        - Left: Absolute Standardized Mean Difference
+        - Right: Variance Ratio
+    """
+    # Identify feature columns
+    if feature_cols is None:
+        all_cols = stratified_df.columns
+        feature_cols = _identify_feature_columns(
+            all_cols, categorical_suffix, numeric_suffix
+        )
+
+    # Sample data if needed
+    if sample_frac < 1.0:
+        stratified_df = stratified_df.sample(withReplacement=False, fraction=sample_frac, seed=42)
+
+    # Collect data to pandas
+    pdf = stratified_df.select(feature_cols + [treatment_col, strata_col]).toPandas()
+
+    # Compute balance statistics
+    balance_df = _compute_balance_stats(pdf, feature_cols, treatment_col, strata_col)
+
+    # Calculate improvement for ordering
+    balance_df["improvement"] = abs(balance_df["smd_unadjusted"]) - abs(
+        balance_df["smd_adjusted"]
+    )
+
+    # Reshape for plotting
+    plot_df = balance_df.melt(
+        id_vars=["covariate", "improvement"],
+        value_vars=["smd_unadjusted", "smd_adjusted", "vr_unadjusted", "vr_adjusted"],
+        var_name="eval_variable",
+        value_name="eval_value",
+    )
+
+    # Parse variable names
+    plot_df["test"] = plot_df["eval_variable"].apply(
+        lambda x: (
+            "Absolute Standardized Mean Difference"
+            if x.startswith("smd")
+            else "Variance Ratio"
+        )
+    )
+    plot_df["set"] = plot_df["eval_variable"].apply(
+        lambda x: "Unadjusted" if x.endswith("unadjusted") else "Adjusted"
+    )
+
+    # Take absolute value of SMD
+    smd_mask = plot_df["test"] == "Absolute Standardized Mean Difference"
+    plot_df.loc[smd_mask, "eval_value"] = plot_df.loc[smd_mask, "eval_value"].abs()
+
+    # Sort by improvement
+    plot_df = plot_df.sort_values("improvement")
+    covariate_order = (
+        balance_df.sort_values("improvement")["covariate"].unique().tolist()
+    )
+
+    # Create figure
+    fig, axes = plt.subplots(1, 2, figsize=figsize, sharey=True)
+
+    # Plot SMD
+    smd_data = plot_df[plot_df["test"] == "Absolute Standardized Mean Difference"]
+    for sample_type in ["Unadjusted", "Adjusted"]:
+        subset = smd_data[smd_data["set"] == sample_type]
+        axes[0].scatter(
+            subset["eval_value"],
+            subset["covariate"],
+            label=sample_type,
+            alpha=0.7,
+            s=50,
+        )
+    axes[0].set_xlabel("Absolute Standardized Mean Difference")
+    axes[0].set_ylabel("Variable")
+    axes[0].legend(title="Sample")
+    axes[0].grid(True, alpha=0.3)
+
+    # Plot Variance Ratio
+    vr_data = plot_df[plot_df["test"] == "Variance Ratio"]
+    for sample_type in ["Unadjusted", "Adjusted"]:
+        subset = vr_data[vr_data["set"] == sample_type]
+        axes[1].scatter(
+            subset["eval_value"],
+            subset["covariate"],
+            label=sample_type,
+            alpha=0.7,
+            s=50,
+        )
+    axes[1].set_xlabel("Variance Ratio")
+    axes[1].legend(title="Sample")
+    axes[1].grid(True, alpha=0.3)
+
+    # Set y-axis to show covariates in order
+    axes[0].set_yticks(range(len(covariate_order)))
+    axes[0].set_yticklabels(covariate_order, fontsize=7)
+
+    plt.tight_layout()
+
+    return fig
+
+
+def _identify_feature_columns(
+    columns: List[str], categorical_suffix: str, numeric_suffix: str
+) -> List[str]:
+    """Identify feature columns by suffix."""
+    features = []
+    for col in columns:
+        if col.endswith(categorical_suffix) or col.endswith(numeric_suffix):
+            features.append(col)
+    return features
+
+
+def _compute_balance_stats(
+    pdf: pd.DataFrame, feature_cols: List[str], treatment_col: str, strata_col: str
+) -> pd.DataFrame:
+    """
+    Compute balance statistics for all features.
+
+    Returns DataFrame with columns:
+    - covariate: feature name
+    - smd_unadjusted: SMD on all data
+    - smd_adjusted: SMD on matched pairs only
+    - vr_unadjusted: Variance ratio on all data
+    - vr_adjusted: Variance ratio on matched pairs only
+    """
+    results = []
+
+    treated = pdf[pdf[treatment_col] == 1]
+    control = pdf[pdf[treatment_col] == 0]
+
+    matched = pdf[pdf[strata_col].notna()]
+    treated_matched = matched[matched[treatment_col] == 1]
+    control_matched = matched[matched[treatment_col] == 0]
+
+    for col in feature_cols:
+        smd_un = _compute_smd(treated[col].values, control[col].values)
+        vr_un = _compute_variance_ratio(treated[col].values, control[col].values)
+        smd_adj = _compute_smd(
+            treated_matched[col].values, control_matched[col].values
+        )
+        vr_adj = _compute_variance_ratio(
+            treated_matched[col].values, control_matched[col].values
+        )
+
+        results.append(
+            {
+                "covariate": col,
+                "smd_unadjusted": smd_un,
+                "smd_adjusted": smd_adj,
+                "vr_unadjusted": vr_un,
+                "vr_adjusted": vr_adj,
+            }
+        )
+
+    return pd.DataFrame(results)
+
+
+def _compute_smd(treated_values: np.ndarray, control_values: np.ndarray) -> float:
+    """Compute standardized mean difference."""
+    mean_t = np.nanmean(treated_values)
+    mean_c = np.nanmean(control_values)
+    var_t = np.nanvar(treated_values, ddof=1)
+    var_c = np.nanvar(control_values, ddof=1)
+    pooled_std = np.sqrt((var_t + var_c) / 2)
+    if pooled_std == 0:
+        return 0.0
+    return (mean_t - mean_c) / pooled_std
+
+
+def _compute_variance_ratio(
+    treated_values: np.ndarray, control_values: np.ndarray
+) -> float:
+    """Compute variance ratio."""
+    var_t = np.nanvar(treated_values, ddof=1)
+    var_c = np.nanvar(control_values, ddof=1)
+    if var_c == 0:
+        return np.inf if var_t > 0 else 1.0
+    return var_t / var_c
