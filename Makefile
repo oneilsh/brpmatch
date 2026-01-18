@@ -50,9 +50,9 @@ publish-test: build check
 	@echo "Publishing to TestPyPI..."
 	# Export env vars so twine picks them up
 	. .env && \
-	TWINE_USERNAME=__token__ TWINE_PASSWORD=$$TEST_PYPI_TOKEN poetry run twine upload --repository testpypi dist/* --skip-existing
+	TWINE_USERNAME=__token__ TWINE_PASSWORD=$$TEST_PYPI_TOKEN poetry run twine upload --repository testpypi dist/*.whl dist/*.tar.gz --skip-existing
 
 publish: build check
 	@echo "Publishing to PyPI..."
 	. .env && \
-	TWINE_USERNAME=__token__ TWINE_PASSWORD=$$PYPI_TOKEN poetry run twine upload dist/* --skip-existing
+	TWINE_USERNAME=__token__ TWINE_PASSWORD=$$PYPI_TOKEN poetry run twine upload dist/*.whl dist/*.tar.gz --skip-existing
