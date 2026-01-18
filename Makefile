@@ -37,7 +37,7 @@ example:
 
 zip: clean build
 	mkdir -p dist
-	cd brpmatch && zip -r ../dist/brpmatch.zip . -x "*.pyc" -x "__pycache__/*" -x "*.egg-info/*"
+	zip -r dist/brpmatch.zip brpmatch -x "*.pyc" -x "*/__pycache__/*" -x "*.egg-info/*"
 	@echo "Created dist/brpmatch.zip"
 
 build:

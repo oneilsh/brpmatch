@@ -132,6 +132,87 @@ spark = SparkSession.builder.master("k8s://https://k8s-master:443").getOrCreate(
 
 If you're working in an environment where Spark is already running (Databricks, AWS EMR, Palantir Foundry, etc.), you can use the existing `spark` session directly. No need to create or configure a SparkSession.
 
+### Complete Example with Simulated Data
+
+This example creates synthetic patient data and runs the full BRPMatch pipeline. Works in any managed Spark environment (Databricks, EMR, Foundry, etc.) where `spark` is already available.
+
+```python
+# spark is already available in managed environments - no need to create it
+
+# If using the offline zip distribution, add it to the path:
+import sys
+zip_path = '/path/to/brpmatch.zip'  # Update path as needed
+sys.path.insert(0, zip_path)
+# Also add to Spark executors for distributed operations:
+spark.sparkContext.addPyFile(zip_path)
+
+# If installed via pip, just import directly (no sys.path modification needed)
+from brpmatch import generate_features, match, stratify_for_plot, love_plot
+import numpy as np
+import pandas as pd
+
+# Generate synthetic patient data
+np.random.seed(42)
+n_patients = 5000
+
+# Create treated cohort (n=2000)
+treated = pd.DataFrame({
+    'person_id': [f'T{i:04d}' for i in range(2000)],
+    'age': np.random.normal(65, 10, 2000),
+    'bmi': np.random.normal(28, 5, 2000),
+    'state': np.random.choice(['CA', 'NY', 'TX', 'FL'], 2000),
+    'smoker': np.random.choice(['Y', 'N'], 2000, p=[0.3, 0.7]),
+    'diabetes': np.random.choice(['Y', 'N'], 2000, p=[0.4, 0.6]),
+    'gender': np.random.choice(['M', 'F'], 2000),
+    'cohort': ['treated'] * 2000
+})
+
+# Create control cohort (n=3000) - slightly different distributions
+control = pd.DataFrame({
+    'person_id': [f'C{i:04d}' for i in range(3000)],
+    'age': np.random.normal(60, 12, 3000),
+    'bmi': np.random.normal(26, 6, 3000),
+    'state': np.random.choice(['CA', 'NY', 'TX', 'FL'], 3000),
+    'smoker': np.random.choice(['Y', 'N'], 3000, p=[0.2, 0.8]),
+    'diabetes': np.random.choice(['Y', 'N'], 3000, p=[0.3, 0.7]),
+    'gender': np.random.choice(['M', 'F'], 3000),
+    'cohort': ['control'] * 3000
+})
+
+# Combine and convert to Spark DataFrame
+df_pandas = pd.concat([treated, control], ignore_index=True)
+df = spark.createDataFrame(df_pandas)
+
+# Run BRPMatch pipeline
+features_df = generate_features(
+    spark,
+    df,
+    categorical_cols=['state', 'smoker', 'diabetes'],
+    numeric_cols=['age', 'bmi'],
+    treatment_col='cohort',
+    treatment_value='treated',
+    exact_match_cols=['gender'],  # Match within same gender
+)
+
+matched_df = match(
+    features_df,
+    distance_metric='euclidean',
+    n_neighbors=3,
+)
+
+stratified_df = stratify_for_plot(features_df, matched_df)
+
+# Generate and display love plot
+fig = love_plot(
+    stratified_df,
+    sample_frac=0.1,
+    figsize=(10, 8)
+)
+
+# Display in notebook (Databricks/Jupyter)
+display(fig)  # or plt.show() or fig.savefig('balance.png')
+```
+
 ### Databricks Example
 
 ```python
