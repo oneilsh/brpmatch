@@ -38,7 +38,8 @@ def stratified_df(spark, lalonde_df):
 
 def test_love_plot_returns_figure(stratified_df):
     """Test that love_plot returns a matplotlib figure."""
-    fig = love_plot(stratified_df, sample_frac=1.0)
+    feature_cols = ["race_index", "married_index", "nodegree_index", "age", "educ", "re74", "re75"]
+    fig = love_plot(stratified_df, feature_cols, sample_frac=1.0)
 
     assert isinstance(fig, matplotlib.figure.Figure)
 
@@ -47,7 +48,8 @@ def test_balance_statistics_computation(stratified_df):
     """Test that balance statistics are computed correctly."""
     # Just ensure the plot can be generated
     # (balance stats are computed internally)
-    fig = love_plot(stratified_df, sample_frac=1.0)
+    feature_cols = ["race_index", "married_index", "nodegree_index", "age", "educ", "re74", "re75"]
+    fig = love_plot(stratified_df, feature_cols, sample_frac=1.0)
 
     # Figure should have 2 subplots (SMD and VR)
     assert len(fig.axes) == 2

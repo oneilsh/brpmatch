@@ -107,31 +107,75 @@ def test_treatment_column_creation(spark, lalonde_df):
     assert all(row["treat"] in [0, 1] for row in treat_counts)
 
 
-def test_numeric_imputation(spark):
-    """Test that null handling works correctly."""
-    from pyspark.sql import Row
-
-    # Create test data with nulls
-    data = [
-        Row(id="1", age=25.0, value=None, treat=1),
-        Row(id="2", age=None, value=10.0, treat=0),
-        Row(id="3", age=30.0, value=20.0, treat=1),
-    ]
-    df = spark.createDataFrame(data)
+def test_only_categorical_features(spark, lalonde_df):
+    """Test that function works with only categorical features."""
+    if "id" not in lalonde_df.columns:
+        lalonde_df = lalonde_df.withColumn("id", F.monotonically_increasing_id())
 
     features_df = generate_features(
         spark,
-        df,
-        categorical_cols=[],
-        numeric_cols=["age", "value"],
+        lalonde_df,
+        categorical_cols=["race", "married", "nodegree"],
+        numeric_cols=None,  # Explicitly None
         treatment_col="treat",
         treatment_value="1",
         id_col="id",
     )
 
-    # Check that imputed columns have no nulls
-    age_nulls = features_df.filter(F.col("age_imputed").isNull()).count()
-    value_nulls = features_df.filter(F.col("value_imputed").isNull()).count()
+    assert "features" in features_df.columns
+    assert features_df.count() > 0
 
-    assert age_nulls == 0
-    assert value_nulls == 0
+
+def test_only_numeric_features(spark, lalonde_df):
+    """Test that function works with only numeric features."""
+    if "id" not in lalonde_df.columns:
+        lalonde_df = lalonde_df.withColumn("id", F.monotonically_increasing_id())
+
+    features_df = generate_features(
+        spark,
+        lalonde_df,
+        categorical_cols=None,  # Explicitly None
+        numeric_cols=["age", "educ", "re74", "re75"],
+        treatment_col="treat",
+        treatment_value="1",
+        id_col="id",
+    )
+
+    assert "features" in features_df.columns
+    assert features_df.count() > 0
+
+
+def test_no_features_raises_error(spark, lalonde_df):
+    """Test that providing no features raises ValueError."""
+    if "id" not in lalonde_df.columns:
+        lalonde_df = lalonde_df.withColumn("id", F.monotonically_increasing_id())
+
+    with pytest.raises(ValueError, match="At least one of.*must be provided"):
+        generate_features(
+            spark,
+            lalonde_df,
+            categorical_cols=None,
+            numeric_cols=None,
+            date_cols=None,
+            treatment_col="treat",
+            treatment_value="1",
+            id_col="id",
+        )
+
+
+def test_exact_match_requires_categorical(spark, lalonde_df):
+    """Test that exact_match_cols requires categorical_cols."""
+    if "id" not in lalonde_df.columns:
+        lalonde_df = lalonde_df.withColumn("id", F.monotonically_increasing_id())
+
+    with pytest.raises(ValueError, match="exact_match_cols can only be used when categorical_cols"):
+        generate_features(
+            spark,
+            lalonde_df,
+            categorical_cols=None,
+            numeric_cols=["age", "educ"],
+            exact_match_cols=["race"],  # Can't use without categorical_cols
+            treatment_col="treat",
+            treatment_value="1",
+            id_col="id",
+        )

@@ -57,10 +57,10 @@ def main():
     features_df = generate_features(
         spark,
         df,
-        categorical_cols=["race", "married", "nodegree"],
-        numeric_cols=["age", "educ", "re74", "re75"],
         treatment_col="treat",
         treatment_value="1",
+        categorical_cols=["race", "married", "nodegree"],
+        numeric_cols=["age", "educ", "re74", "re75"],
         id_col="id",
     )
 
@@ -95,8 +95,10 @@ def main():
 
     # 4. Generate love plot
     print("\n4. Generating love plot...")
+    feature_cols = ["race_index", "married_index", "nodegree_index", "age", "educ", "re74", "re75"]
     fig = love_plot(
         stratified_df,
+        feature_cols,
         treatment_col="treat",
         sample_frac=1.0,  # Use all data for small dataset
     )

@@ -11,7 +11,6 @@ BRPMatch is a Spark-based cohort matching tool that uses distance-based methods 
 - **Advanced matching**: LSH-based bucketing with k-NN matching within buckets
 - **Distance metrics**: Euclidean and Mahalanobis distance supported
 - **Visualization**: Generates love plots to assess covariate balance
-- **GBT imputation**: Optional gradient boosted tree imputation for missing values
 
 ## Installation
 
@@ -53,13 +52,12 @@ df = spark.read.csv("data.csv", header=True, inferSchema=True)
 features_df = generate_features(
     spark,
     df,
+    treatment_col="cohort",
+    treatment_value="treated",
     categorical_cols=["state", "smoker", "diabetes"],
     numeric_cols=["age", "bmi"],
     date_cols=["diagnosis_date"],
     exact_match_cols=["gender"],           # Pre-stratification
-    treatment_col="cohort",
-    treatment_value="treated",
-    gbt_impute_cols=["bmi"],               # Optional GBT imputation
 )
 
 # 2. Perform matching
@@ -74,8 +72,10 @@ matched_df = match(
 stratified_df = stratify_for_plot(features_df, matched_df)
 
 # 4. Generate love plot
+feature_cols = ["state_index", "smoker_index", "diabetes_index", "age", "bmi", "diagnosis_date_days_from_2018"]
 fig = love_plot(
     stratified_df,
+    feature_cols,
     treatment_col="treat",
     sample_frac=0.05,
 )
@@ -187,10 +187,10 @@ df = spark.createDataFrame(df_pandas)
 features_df = generate_features(
     spark,
     df,
-    categorical_cols=['state', 'smoker', 'diabetes'],
-    numeric_cols=['age', 'bmi'],
     treatment_col='cohort',
     treatment_value='treated',
+    categorical_cols=['state', 'smoker', 'diabetes'],
+    numeric_cols=['age', 'bmi'],
     exact_match_cols=['gender'],  # Match within same gender
 )
 
@@ -203,8 +203,10 @@ matched_df = match(
 stratified_df = stratify_for_plot(features_df, matched_df)
 
 # Generate and display love plot
+feature_cols = ["state_index", "smoker_index", "diabetes_index", "age", "bmi"]
 fig = love_plot(
     stratified_df,
+    feature_cols,
     sample_frac=0.1,
     figsize=(10, 8)
 )
@@ -229,10 +231,10 @@ df = spark.read.parquet("/mnt/data/cohorts/")
 features_df = generate_features(
     spark,  # Use the existing spark session
     df,
-    categorical_cols=["state", "race", "smoker"],
-    numeric_cols=["age", "bmi", "baseline_glucose"],
     treatment_col="treatment_group",
     treatment_value="intervention",
+    categorical_cols=["state", "race", "smoker"],
+    numeric_cols=["age", "bmi", "baseline_glucose"],
     exact_match_cols=["study_site"],  # Match within same site
 )
 
@@ -240,7 +242,8 @@ matched_df = match(features_df, n_neighbors=5)
 stratified_df = stratify_for_plot(features_df, matched_df)
 
 # Generate and display plot in notebook
-fig = love_plot(stratified_df, sample_frac=0.1)
+feature_cols = ["state_index", "race_index", "smoker_index", "age", "bmi", "baseline_glucose"]
+fig = love_plot(stratified_df, feature_cols, sample_frac=0.1)
 display(fig)  # Databricks display function
 ```
 
@@ -255,7 +258,7 @@ features_df = generate_features(...).cache()
 matched_df = match(features_df, bucket_length=3.0)
 
 # Sample for visualization
-fig = love_plot(stratified_df, sample_frac=0.01)  # Use 1% of data
+fig = love_plot(stratified_df, feature_cols, sample_frac=0.01)  # Use 1% of data
 ```
 
 ## API Reference
@@ -267,17 +270,58 @@ Converts patient data into feature vectors for matching.
 **Parameters:**
 - `spark`: Active Spark session
 - `df`: Input DataFrame with patient data
-- `categorical_cols`: Columns to one-hot encode
-- `numeric_cols`: Columns to treat as numeric (mean imputation)
 - `treatment_col`: Column indicating treatment/control status
 - `treatment_value`: Value indicating "treated" group
+- `categorical_cols`: Columns to one-hot encode (optional if numeric_cols or date_cols provided)
+- `numeric_cols`: Columns to treat as numeric (optional if categorical_cols or date_cols provided; must not contain nulls)
 - `date_cols`: Date columns to convert to numeric (optional)
-- `exact_match_cols`: Columns for exact matching stratification (optional)
-- `gbt_impute_cols`: Columns to impute using GBT (optional)
+- `exact_match_cols`: Categorical columns for exact matching stratification (optional; requires categorical_cols)
 - `date_reference`: Reference date for date conversion (default: "2018-01-01")
 - `id_col`: Patient identifier column (default: "person_id")
 
+**Requirements:**
+- At least one of `categorical_cols`, `numeric_cols`, or `date_cols` must be provided
+- If `exact_match_cols` is used, `categorical_cols` must be provided (exact match columns must be categorical)
+
+**Note on Missing Values**: Numeric columns should not contain null values -
+nulls may cause errors in downstream operations. Handle missing data before
+calling this function using PySpark's `df.na.drop()` or `df.na.fill()` methods.
+
 **Returns:** DataFrame with features, treatment indicator, and exact match ID
+
+**Examples:**
+
+```python
+# Example 1: Only categorical features
+features_df = generate_features(
+    spark,
+    df,
+    treatment_col="cohort",
+    treatment_value="treated",
+    categorical_cols=["state", "smoker", "diabetes", "gender"],
+)
+
+# Example 2: Only numeric features
+features_df = generate_features(
+    spark,
+    df,
+    treatment_col="cohort",
+    treatment_value="treated",
+    numeric_cols=["age", "bmi", "baseline_glucose"],
+)
+
+# Example 3: Mixed features (recommended)
+features_df = generate_features(
+    spark,
+    df,
+    treatment_col="cohort",
+    treatment_value="treated",
+    categorical_cols=["state", "smoker", "diabetes"],
+    numeric_cols=["age", "bmi"],
+    date_cols=["diagnosis_date"],
+    exact_match_cols=["gender"],
+)
+```
 
 ### `match()`
 
@@ -315,13 +359,11 @@ Generates a love plot showing covariate balance.
 
 **Parameters:**
 - `stratified_df`: Output from stratify_for_plot()
+- `feature_cols`: List of feature columns to include in the plot (both categorical and numeric)
 - `treatment_col`: Treatment indicator column (default: "treat")
 - `strata_col`: Strata identifier column (default: "strata")
-- `categorical_suffix`: Suffix for categorical features (default: "_index")
-- `numeric_suffix`: Suffix for numeric features (default: "_imputed")
 - `sample_frac`: Sampling fraction for large datasets (default: 0.05)
 - `figsize`: Figure size (default: (10, 12))
-- `feature_cols`: Specific features to plot (optional)
 
 **Returns:** matplotlib Figure object
 

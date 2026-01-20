@@ -4,7 +4,7 @@ Love plot visualization for BRPMatch covariate balance.
 This module generates love plots showing covariate balance before and after matching.
 """
 
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import matplotlib.figure
 import matplotlib.pyplot as plt
@@ -15,13 +15,11 @@ from pyspark.sql import DataFrame
 
 def love_plot(
     stratified_df: DataFrame,
+    feature_cols: List[str],
     treatment_col: str = "treat",
     strata_col: str = "strata",
-    categorical_suffix: str = "_index",
-    numeric_suffix: str = "_imputed",
     sample_frac: float = 0.05,
     figsize: Tuple[int, int] = (10, 12),
-    feature_cols: Optional[List[str]] = None,
 ) -> matplotlib.figure.Figure:
     """
     Generate a love plot showing covariate balance before and after matching.
@@ -30,20 +28,16 @@ def love_plot(
     ----------
     stratified_df : DataFrame
         Output from stratify_for_plot()
+    feature_cols : List[str]
+        Columns to include in the plot (both categorical and numeric features)
     treatment_col : str
         Column indicating treatment (1) vs control (0)
     strata_col : str
         Column identifying matched pairs
-    categorical_suffix : str
-        Suffix identifying categorical feature columns
-    numeric_suffix : str
-        Suffix identifying numeric feature columns
     sample_frac : float
         Fraction of data to sample for plotting (for large datasets)
     figsize : Tuple[int, int]
         Figure size (width, height) in inches
-    feature_cols : Optional[List[str]]
-        Specific columns to include. If None, auto-detect by suffix.
 
     Returns
     -------
@@ -52,12 +46,6 @@ def love_plot(
         - Left: Absolute Standardized Mean Difference
         - Right: Variance Ratio
     """
-    # Identify feature columns
-    if feature_cols is None:
-        all_cols = stratified_df.columns
-        feature_cols = _identify_feature_columns(
-            all_cols, categorical_suffix, numeric_suffix
-        )
 
     # Sample data if needed
     if sample_frac < 1.0:
@@ -145,17 +133,6 @@ def love_plot(
     plt.tight_layout()
 
     return fig
-
-
-def _identify_feature_columns(
-    columns: List[str], categorical_suffix: str, numeric_suffix: str
-) -> List[str]:
-    """Identify feature columns by suffix."""
-    features = []
-    for col in columns:
-        if col.endswith(categorical_suffix) or col.endswith(numeric_suffix):
-            features.append(col)
-    return features
 
 
 def _compute_balance_stats(

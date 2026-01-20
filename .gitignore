@@ -52,6 +52,9 @@ htmlcov/
 *~
 .DS_Store
 
+# Claude Code
+.claude/
+
 # Jupyter Notebook
 .ipynb_checkpoints
 

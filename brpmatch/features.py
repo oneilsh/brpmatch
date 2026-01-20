@@ -9,27 +9,24 @@ from typing import List, Optional
 import pyspark.sql.functions as F
 from pyspark.ml import Pipeline
 from pyspark.ml.feature import (
-    Imputer,
     OneHotEncoder,
     StandardScaler,
     StringIndexer,
     VectorAssembler,
 )
-from pyspark.ml.regression import GBTRegressor
 from pyspark.sql import DataFrame, SparkSession
 
 
 def generate_features(
     spark: SparkSession,
     df: DataFrame,
-    categorical_cols: List[str],
-    numeric_cols: List[str],
     treatment_col: str,
     treatment_value: str,
+    categorical_cols: Optional[List[str]] = None,
+    numeric_cols: Optional[List[str]] = None,
     date_cols: Optional[List[str]] = None,
     exact_match_cols: Optional[List[str]] = None,
-    gbt_impute_cols: Optional[List[str]] = None,
-    date_reference: str = "2018-01-01",
+    date_reference: str = "1970-01-01",
     id_col: str = "person_id",
 ) -> DataFrame:
     """
@@ -39,9 +36,8 @@ def generate_features(
     1. Converts dates to numeric (days from reference date)
     2. Creates exact match stratification IDs
     3. One-hot encodes categorical variables
-    4. Imputes missing numeric values (mean or GBT)
-    5. Standardizes features
-    6. Creates treatment indicator
+    4. Standardizes features
+    5. Creates treatment indicator
 
     Parameters
     ----------
@@ -49,20 +45,21 @@ def generate_features(
         Active Spark session
     df : DataFrame
         Input DataFrame with patient data
-    categorical_cols : List[str]
-        Columns to treat as categorical (will be one-hot encoded)
-    numeric_cols : List[str]
-        Columns to treat as numeric (will be mean-imputed)
     treatment_col : str
         Column name containing treatment/cohort indicator
     treatment_value : str
         Value in treatment_col that indicates "treated" group
+    categorical_cols : Optional[List[str]]
+        Columns to treat as categorical (will be one-hot encoded). Optional if
+        numeric_cols or date_cols is provided.
+    numeric_cols : Optional[List[str]]
+        Columns to treat as numeric (must not contain nulls). Optional if
+        categorical_cols or date_cols is provided.
     date_cols : Optional[List[str]]
-        Date columns to convert to numeric (days from date_reference)
+        Date columns to convert to numeric (days from date_reference). Optional.
     exact_match_cols : Optional[List[str]]
-        Categorical columns to use for exact matching stratification
-    gbt_impute_cols : Optional[List[str]]
-        Numeric/date columns to impute using Gradient Boosted Trees
+        Categorical columns to use for exact matching stratification. Requires
+        categorical_cols to be provided. Optional.
     date_reference : str
         Reference date for converting date columns to numeric
     id_col : str
@@ -75,17 +72,32 @@ def generate_features(
         - 'features' column (scaled feature vector)
         - 'treat' column (1 for treated, 0 for control)
         - 'exact_match_id' column (for stratification)
-        - Original columns with suffixes (_index, _imputed, etc.)
+        - Original columns with suffixes (_index, etc.)
         - treatment_col column
         - id_col column
     """
     # Set defaults for optional parameters
+    if categorical_cols is None:
+        categorical_cols = []
+    if numeric_cols is None:
+        numeric_cols = []
     if date_cols is None:
         date_cols = []
     if exact_match_cols is None:
         exact_match_cols = []
-    if gbt_impute_cols is None:
-        gbt_impute_cols = []
+
+    # Validate that at least one feature type is provided
+    if not categorical_cols and not numeric_cols and not date_cols:
+        raise ValueError(
+            "At least one of categorical_cols, numeric_cols, or date_cols must be provided"
+        )
+
+    # Validate that exact_match_cols requires categorical_cols
+    if exact_match_cols and not categorical_cols:
+        raise ValueError(
+            "exact_match_cols can only be used when categorical_cols is provided. "
+            "All exact match columns must be categorical."
+        )
 
     # Validate that each column is only listed once
     all_cols = categorical_cols + numeric_cols + date_cols
@@ -102,14 +114,6 @@ def generate_features(
             raise RuntimeError(
                 f"The column {col} must be listed as a categorical column "
                 "to be used for exact matching."
-            )
-
-    # Validate gbt_impute_cols are numeric or date columns
-    for col in gbt_impute_cols:
-        if col not in numeric_cols + date_cols:
-            raise RuntimeError(
-                f"The column {col} must be listed as a numeric or date column "
-                "to be used for GBT imputation."
             )
 
     # Convert categorical columns to strings
@@ -149,10 +153,6 @@ def generate_features(
     # (they won't be used for feature-based matching)
     categorical_cols = list(filter(lambda x: x not in exact_match_cols, categorical_cols))
 
-    # Remove GBT imputation columns from numeric columns
-    # (so they are not imputed with mean imputation)
-    numeric_cols = list(filter(lambda x: x not in gbt_impute_cols, numeric_cols))
-
     # Build preprocessing pipeline
     preprocessing_stages = []
 
@@ -170,64 +170,21 @@ def generate_features(
         ]
         categorical_index_cols.append(f"{c}_index")
 
-    # Impute missing numeric values with mean imputation
+    # Create feature vector from onehot and numeric columns
     print("numeric_cols", numeric_cols)
-    for c in numeric_cols:
-        preprocessing_stages += [
-            Imputer(inputCol=c, outputCol=f"{c}_imputed", strategy="mean")
-        ]
-
-    # Create feature vector from onehot/imputed columns
-    feature_cols = [f"{c}_onehot" for c in categorical_cols] + [
-        f"{c}_imputed" for c in numeric_cols
-    ]
+    feature_cols = [f"{c}_onehot" for c in categorical_cols] + numeric_cols
     preprocessing_stages += [
-        VectorAssembler(inputCols=feature_cols, outputCol="gbt_features")
+        VectorAssembler(inputCols=feature_cols, outputCol="unscaled_features")
     ]
 
     df = Pipeline(stages=preprocessing_stages).fit(df).transform(df)
 
-    # Apply GBT imputation for specified columns
-    if len(gbt_impute_cols) > 0:
-        for c in gbt_impute_cols:
-            values = df.filter(F.col(c).isNotNull())
-            gbt_model = Pipeline(
-                stages=[
-                    GBTRegressor(
-                        featuresCol="gbt_features",
-                        labelCol=c,
-                        predictionCol=f"{c}_imputed",
-                        seed=42,
-                    )
-                ]
-            )
-
-            # Predict column value, but use actual value when available
-            df = (
-                gbt_model.fit(values)
-                .transform(df)
-                .withColumn(f"{c}_imputed", F.coalesce(F.col(c), F.col(f"{c}_imputed")))
-            )
-
-        # Add GBT features to features vector
-        print(feature_cols)
-        feature_cols = ["gbt_features"] + [f"{c}_imputed" for c in gbt_impute_cols]
-        print(feature_cols)
-        finish_features_p = Pipeline(
-            stages=[
-                VectorAssembler(inputCols=feature_cols, outputCol="unscaled_features"),
-                StandardScaler(
-                    inputCol="unscaled_features", outputCol="features", withStd=True
-                ),
-            ]
-        )
-    else:
-        # No GBT imputation, just scale existing features
-        finish_features_p = Pipeline(
-            stages=[
-                StandardScaler(inputCol="gbt_features", outputCol="features", withStd=True)
-            ]
-        )
+    # Scale features
+    finish_features_p = Pipeline(
+        stages=[
+            StandardScaler(inputCol="unscaled_features", outputCol="features", withStd=True)
+        ]
+    )
 
     df = finish_features_p.fit(df).transform(df)
 
@@ -243,10 +200,8 @@ def generate_features(
         categorical_cols
         + numeric_cols
         + date_cols
-        + gbt_impute_cols
         + exact_match_cols
         + categorical_index_cols
-        + feature_cols
         + ["exact_match_id"]
         + ["features"]
         + ["treat"]
