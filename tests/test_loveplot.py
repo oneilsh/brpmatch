@@ -27,10 +27,11 @@ def stratified_df(spark, lalonde_df):
         treatment_col="treat",
         treatment_value="1",
         id_col="id",
+        verbose=False,
     )
 
     # Match
-    matched_df = match(features_df, distance_metric="euclidean", n_neighbors=5, id_col="id")
+    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5, id_col="id", verbose=False)
 
     # Stratify
     return stratify_for_plot(features_df, matched_df, id_col="id", match_id_col="match_id")

@@ -6,7 +6,8 @@ between treated and control cohorts.
 """
 
 import time
-from typing import Literal, Optional
+import warnings
+from typing import Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -38,6 +39,7 @@ def match(
     treatment_col: str = "treat",
     id_col: str = "person_id",
     exact_match_col: str = "exact_match_id",
+    verbose: bool = True,
 ) -> DataFrame:
     """
     Perform LSH-based distance matching between treated and control cohorts.
@@ -76,6 +78,8 @@ def match(
         Patient identifier column name
     exact_match_col : str
         Column for exact matching stratification
+    verbose : bool
+        If True, print progress and summary information
 
     Returns
     -------
@@ -92,11 +96,13 @@ def match(
     )
 
     # Logging
-    print("Pre-filter")
-    print(persons_features_cohorts.groupBy(treatment_col).count().toPandas())
+    if verbose:
+        print("Pre-filter")
+        print(persons_features_cohorts.groupBy(treatment_col).count().toPandas())
 
     # Compute whitening transform for mahalanobis feature space
     whitening_matrix = None
+    whitening_info = None  # Store for summary (original_dims, retained_dims)
     if feature_space == "mahalanobis":
         # Convert ML vectors to MLlib vectors for RowMatrix
         vec_converter_udf = F.udf(lambda v: Vectors.dense(v.toArray()), VectorUDT())
@@ -124,8 +130,12 @@ def match(
         inv_sqrt_eigenvalues = np.diag(1.0 / np.sqrt(eigenvalues_filtered))
         whitening_matrix = inv_sqrt_eigenvalues @ eigenvectors_filtered.T
 
-        print(f"Whitening transform: {cov_matrix.shape[0]} features -> {whitening_matrix.shape[0]} components")
-        print(f"Filtered {np.sum(~valid_mask)} near-zero eigenvalues")
+        # Store whitening info for summary
+        whitening_info = (cov_matrix.shape[0], whitening_matrix.shape[0])
+
+        if verbose:
+            print(f"Whitening transform: {cov_matrix.shape[0]} features -> {whitening_matrix.shape[0]} components")
+            print(f"Filtered {np.sum(~valid_mask)} near-zero eigenvalues")
 
         # Broadcast whitening matrix to all workers
         spark_context = persons_features_cohorts.sparkSession.sparkContext
@@ -265,8 +275,6 @@ def match(
         .join(bucket_counts4, "bucket_id4", how="full")
     )
 
-    print("two")
-    print(persons_bucketed.count())
 
     # Select finest bucket level that keeps bucket size below threshold
     persons_bucketed = (
@@ -331,7 +339,7 @@ def match(
     persons_bucketed = persons_bucketed.join(viable_buckets, "bucket_id")
 
     # Log bucket statistics for parameter tuning
-    _log_bucket_stats(persons_bucketed, id_col)
+    num_buckets = _log_bucket_stats(persons_bucketed, id_col, verbose=verbose)
 
     # Schema for return from pandas UDF
     schema_potential_matches_arrays = StructType(
@@ -453,24 +461,91 @@ def match(
         .applyInPandas(find_neighbors, schema=schema_potential_matches_arrays)
     )
 
+    # Print match summary if verbose
+    if verbose:
+        # Count treated, control, and matched
+        cohort_counts = persons_features_cohorts.groupBy(treatment_col).count().toPandas()
+        n_treated = int(cohort_counts[cohort_counts[treatment_col] == 1]["count"].iloc[0]) if len(cohort_counts[cohort_counts[treatment_col] == 1]) > 0 else 0
+        n_control = int(cohort_counts[cohort_counts[treatment_col] == 0]["count"].iloc[0]) if len(cohort_counts[cohort_counts[treatment_col] == 0]) > 0 else 0
+        n_matched = matches.count()
+
+        _print_match_summary(
+            feature_space=feature_space,
+            n_treated=n_treated,
+            n_control=n_control,
+            n_matched=n_matched,
+            bucket_length=bucket_length,
+            num_hash_tables=num_hash_tables,
+            whitening_info=whitening_info,
+            num_buckets=num_buckets,
+        )
+
     return matches
 
 
-def _log_bucket_stats(persons_bucketed: DataFrame, id_col: str) -> None:
-    """Log bucket statistics for parameter tuning."""
+def _print_match_summary(
+    feature_space: str,
+    n_treated: int,
+    n_control: int,
+    n_matched: int,
+    bucket_length: float,
+    num_hash_tables: int,
+    whitening_info: Optional[Tuple[int, int]] = None,
+    num_buckets: int = 0,
+    warn_threshold: float = 0.5,
+) -> None:
+    """Print MatchIt-style summary of matching results."""
+    print("\nBRPMatch: 1:1 nearest neighbor matching via LSH")
+
+    # Feature space info
+    if feature_space == "mahalanobis" and whitening_info:
+        orig, retained = whitening_info
+        print(f" - feature space: mahalanobis (whitened to {retained} components from {orig} features)")
+    else:
+        print(f" - feature space: {feature_space}")
+
+    # LSH parameters
+    print(f" - LSH bucket_length: {bucket_length:.4f}, num_hash_tables: {num_hash_tables}")
+    print(f" - num_buckets: {num_buckets}")
+
+    # Sample sizes
+    print(f" - sample sizes:")
+    print(f"     treated: {n_treated}")
+    print(f"     control: {n_control}")
+
+    # Match results
+    match_rate = (n_matched / n_treated) if n_treated > 0 else 0
+    print(f" - matched: {n_matched} pairs ({match_rate*100:.1f}% of treated)")
+
+    # Warn if match rate is low
+    if match_rate < warn_threshold:
+        warnings.warn(
+            f"Low match rate: only {match_rate*100:.1f}% of treated units were matched. "
+            f"Consider adjusting bucket_length or num_hash_tables parameters.",
+            UserWarning
+        )
+
+
+def _log_bucket_stats(persons_bucketed: DataFrame, id_col: str, verbose: bool = True) -> int:
+    """Log bucket statistics for parameter tuning. Returns bucket count."""
     bucket_counts = persons_bucketed.groupBy("bucket_id").agg(
         F.count(F.col("bucket_id")).alias("bucket_num_persons")
     )
-    print(f"Num buckets: {bucket_counts.count()}")
-    print("Bucket stats:")
-    stats = bucket_counts.select(
-        F.min(F.col("bucket_num_persons")).alias("min"),
-        F.percentile_approx(F.col("bucket_num_persons"), 0.05).alias("percentile_5"),
-        F.percentile_approx(F.col("bucket_num_persons"), 0.25).alias("percentil_25"),
-        F.percentile_approx(F.col("bucket_num_persons"), 0.5).alias("percentile_50"),
-        F.percentile_approx(F.col("bucket_num_persons"), 0.75).alias("percentile_75"),
-        F.percentile_approx(F.col("bucket_num_persons"), 0.95).alias("percentil_95"),
-        F.max(F.col("bucket_num_persons")).alias("max"),
-        F.mean(F.col("bucket_num_persons")).alias("mean"),
-    ).toPandas()
-    print(stats.to_string())
+    num_buckets = bucket_counts.count()
+
+    if verbose:
+        print(f"Num buckets: {num_buckets}")
+        print("Bucket stats:")
+        stats = bucket_counts.select(
+            F.min(F.col("bucket_num_persons")).alias("min"),
+            F.percentile_approx(F.col("bucket_num_persons"), 0.05).alias("percentile_5"),
+            F.percentile_approx(F.col("bucket_num_persons"), 0.25).alias("percentile_25"),
+            F.percentile_approx(F.col("bucket_num_persons"), 0.5).alias("percentile_50"),
+            F.percentile_approx(F.col("bucket_num_persons"), 0.75).alias("percentile_75"),
+            F.percentile_approx(F.col("bucket_num_persons"), 0.95).alias("percentile_95"),
+            F.max(F.col("bucket_num_persons")).alias("max"),
+            F.mean(F.col("bucket_num_persons")).alias("mean"),
+        ).toPandas()
+        print(stats.to_string())
+
+    return num_buckets

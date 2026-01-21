@@ -28,6 +28,7 @@ def generate_features(
     exact_match_cols: Optional[List[str]] = None,
     date_reference: str = "1970-01-01",
     id_col: str = "person_id",
+    verbose: bool = True,
 ) -> DataFrame:
     """
     Convert patient data into feature vectors for matching.
@@ -64,6 +65,8 @@ def generate_features(
         Reference date for converting date columns to numeric
     id_col : str
         Patient identifier column name
+    verbose : bool
+        If True, print progress information (currently unused, reserved for future)
 
     Returns
     -------
@@ -157,7 +160,6 @@ def generate_features(
     preprocessing_stages = []
 
     # Convert categorical variables to one-hot encodings
-    print("categorical_cols", categorical_cols)
     categorical_index_cols = []
     for c in categorical_cols:
         preprocessing_stages += [
@@ -171,7 +173,6 @@ def generate_features(
         categorical_index_cols.append(f"{c}_index")
 
     # Create feature vector from onehot and numeric columns
-    print("numeric_cols", numeric_cols)
     feature_cols = [f"{c}_onehot" for c in categorical_cols] + numeric_cols
     preprocessing_stages += [
         VectorAssembler(inputCols=feature_cols, outputCol="unscaled_features")

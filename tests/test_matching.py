@@ -23,12 +23,13 @@ def features_df(spark, lalonde_df):
         treatment_col="treat",
         treatment_value="1",
         id_col="id",
+        verbose=False,
     )
 
 
 def test_basic_matching(features_df):
     """Test basic matching with euclidean distance."""
-    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5, id_col="id")
+    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5, id_col="id", verbose=False)
 
     # Check that required columns exist
     assert "id" in matched_df.columns
@@ -37,7 +38,7 @@ def test_basic_matching(features_df):
 
 def test_one_to_one_constraint(features_df):
     """Test that matching satisfies 1-to-1 constraint."""
-    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5, id_col="id")
+    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5, id_col="id", verbose=False)
 
     # Collect to pandas for easier checking
     pdf = matched_df.toPandas()
@@ -60,7 +61,7 @@ def test_match_count_bounded(features_df):
     treat_count = next(row["count"] for row in treat_counts if row["treat"] == 1)
     control_count = next(row["count"] for row in treat_counts if row["treat"] == 0)
 
-    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5, id_col="id")
+    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5, id_col="id", verbose=False)
 
     match_count = matched_df.count()
 
@@ -71,7 +72,7 @@ def test_match_count_bounded(features_df):
 def test_mahalanobis_distance(features_df):
     """Test matching with Mahalanobis distance."""
     matched_df = match(
-        features_df, feature_space="mahalanobis", n_neighbors=5, id_col="id"
+        features_df, feature_space="mahalanobis", n_neighbors=5, id_col="id", verbose=False
     )
 
     # Should produce valid matches
@@ -85,7 +86,7 @@ def test_mahalanobis_distance(features_df):
 def test_mahalanobis_uses_whitening(features_df):
     """Test that mahalanobis feature space produces valid matches using whitening."""
     matched_df = match(
-        features_df, feature_space="mahalanobis", n_neighbors=5, id_col="id"
+        features_df, feature_space="mahalanobis", n_neighbors=5, id_col="id", verbose=False
     )
 
     # Should produce valid matches

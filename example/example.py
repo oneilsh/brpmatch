@@ -17,13 +17,13 @@ import os
 
 from pyspark.sql import SparkSession, functions as F
 
-from brpmatch import generate_features, love_plot, match, stratify_for_plot
+from brpmatch import generate_features, love_plot, match, stratify_for_plot, match_summary
 
 
 def main():
     """Run BRPMatch example on Lalonde dataset with Euclidean and Mahalanobis feature spaces."""
-    import warnings
-    warnings.filterwarnings("ignore")
+    #import warnings
+    #warnings.filterwarnings("ignore")
 
     print("=" * 80)
     print("BRPMatch Example: Euclidean vs Mahalanobis Feature Spaces")
@@ -95,7 +95,7 @@ def main():
     matched_euclidean = match(
         features_df,
         feature_space="euclidean",
-        n_neighbors=5,
+        n_neighbors=10,
         id_col="id",
     )
     print(f"Generated {matched_euclidean.count()} matches")
@@ -108,31 +108,41 @@ def main():
     matched_mahalanobis = match(
         features_df,
         feature_space="mahalanobis",
-        n_neighbors=5,
+        n_neighbors=10,
         id_col="id",
     )
     print(f"Generated {matched_mahalanobis.count()} matches")
 
-    # 4. Stratify and visualize
+    # 4. Generate balance summaries
     print("\n" + "=" * 80)
-    print("Step 4: Generating Balance Plots")
+    print("Step 4: Generating Balance Summaries")
     print("=" * 80)
-    stratified_euclidean = stratify_for_plot(
-        features_df, matched_euclidean, id_col="id", match_id_col="match_id"
-    )
-    stratified_mahalanobis = stratify_for_plot(
-        features_df, matched_mahalanobis, id_col="id", match_id_col="match_id"
-    )
 
     feature_cols = ["race_index", "married_index", "nodegree_index", "age", "educ", "re74", "re75"]
 
-    fig_euc = love_plot(stratified_euclidean, feature_cols, treatment_col="treat", sample_frac=1.0)
+    print("\nEuclidean Balance Summary:")
+    summary_euc, fig_euc = match_summary(
+        features_df,
+        matched_euclidean,
+        feature_cols,
+        id_col="id",
+        sample_frac=1.0,  # Full data for small dataset
+        plot=True,
+    )
     fig_euc.savefig(os.path.join(output_dir, "lalonde_euclidean_balance.png"), dpi=150, bbox_inches="tight")
-    print("Saved lalonde_euclidean_balance.png")
+    print("\nSaved lalonde_euclidean_balance.png")
 
-    fig_mah = love_plot(stratified_mahalanobis, feature_cols, treatment_col="treat", sample_frac=1.0)
+    print("\nMahalanobis Balance Summary:")
+    summary_mah, fig_mah = match_summary(
+        features_df,
+        matched_mahalanobis,
+        feature_cols,
+        id_col="id",
+        sample_frac=1.0,
+        plot=True,
+    )
     fig_mah.savefig(os.path.join(output_dir, "lalonde_mahalanobis_balance.png"), dpi=150, bbox_inches="tight")
-    print("Saved lalonde_mahalanobis_balance.png")
+    print("\nSaved lalonde_mahalanobis_balance.png")
 
     # 5. Save matched pairs
     print("\n" + "=" * 80)

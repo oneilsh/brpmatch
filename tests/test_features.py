@@ -22,6 +22,7 @@ def test_basic_feature_generation(spark, lalonde_df):
         treatment_col="treat",
         treatment_value="1",
         id_col="id",
+        verbose=False,
     )
 
     # Check that required columns exist
@@ -44,6 +45,7 @@ def test_feature_vector_dimensions(spark, lalonde_df):
         treatment_col="treat",
         treatment_value="1",
         id_col="id",
+        verbose=False,
     )
 
     # Get feature vector size
@@ -72,6 +74,7 @@ def test_exact_match_cols(spark, lalonde_df):
         treatment_value="1",
         exact_match_cols=["married"],
         id_col="id",
+        verbose=False,
     )
 
     # Check that exact_match_id exists and has distinct values
@@ -99,6 +102,7 @@ def test_treatment_column_creation(spark, lalonde_df):
         treatment_col="treat",
         treatment_value="1",
         id_col="id",
+        verbose=False,
     )
 
     # Check that treat column has 0 and 1 values
@@ -120,6 +124,7 @@ def test_only_categorical_features(spark, lalonde_df):
         treatment_col="treat",
         treatment_value="1",
         id_col="id",
+        verbose=False,
     )
 
     assert "features" in features_df.columns
@@ -139,6 +144,7 @@ def test_only_numeric_features(spark, lalonde_df):
         treatment_col="treat",
         treatment_value="1",
         id_col="id",
+        verbose=False,
     )
 
     assert "features" in features_df.columns
