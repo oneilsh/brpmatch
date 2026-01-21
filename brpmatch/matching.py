@@ -40,15 +40,21 @@ def match(
     id_col: str = "person_id",
     exact_match_col: str = "exact_match_id",
     verbose: bool = True,
+    # New parameters for 1-to-k matching:
+    ratio_k: int = 1,
+    with_replacement: bool = False,
+    reuse_max: Optional[int] = None,
+    require_k: bool = True,
 ) -> DataFrame:
     """
     Perform LSH-based distance matching between treated and control cohorts.
 
     This function implements a multi-stage matching algorithm:
     1. Hash patients into buckets using Locality-Sensitive Hashing (LSH)
-    2. Within each bucket, use k-NN to find similar control patients for each treated patient
-    3. Apply greedy 1-to-1 matching to ensure unique matches
-    4. Return matched pairs with distances
+    2. Within each bucket, use k-NN to find candidate control patients
+    3. Apply matching algorithm (greedy 1-to-1 per round for without replacement,
+       or independent selection for with replacement)
+    4. Return matched pairs with distances and weights
 
     The algorithm uses 4 bucket levels with progressively smaller bucket lengths
     to adaptively handle varying bucket sizes.
@@ -63,7 +69,8 @@ def match(
         transform so that Euclidean distance in transformed space equals
         Mahalanobis distance in original space.
     n_neighbors : int
-        Number of nearest neighbors to consider per treated patient
+        Number of nearest neighbors to consider per treated patient.
+        Should be >= ratio_k to ensure enough candidates.
     bucket_length : Optional[float]
         Base bucket length for LSH. If None, computed as N^(-1/d)
     num_hash_tables : int
@@ -80,6 +87,21 @@ def match(
         Column for exact matching stratification
     verbose : bool
         If True, print progress and summary information
+    ratio_k : int
+        Number of controls to match per treated patient (k in k:1 matching).
+        Default is 1 for standard 1:1 matching.
+    with_replacement : bool
+        If False (default), each control can only be matched to one treated
+        patient. Uses round-robin algorithm for fairness (all treated get
+        round 1 matches before any get round 2).
+        If True, controls can be reused across different treated patients.
+    reuse_max : Optional[int]
+        Maximum times a control can be reused. Only applies when
+        with_replacement=True. None means unlimited reuse.
+    require_k : bool
+        If True (default), treated patients who cannot get exactly ratio_k
+        matches are excluded from output. If False, treated patients may
+        receive fewer than ratio_k matches.
 
     Returns
     -------
@@ -87,13 +109,53 @@ def match(
         DataFrame with columns:
         - {id_col}: treated patient ID
         - match_{id_col}: matched control patient ID
+        - match_round: which round this match came from (1=best, 2=second best, etc.)
+        - treated_k: total matches for this treated patient
+        - control_usage_count: times this control was matched (always 1 if without replacement)
+        - pair_weight: weight for analysis = 1/(treated_k * control_usage_count)
         - bucket_num_input_patients: size of bucket where match was found
         - bucket_seconds: time to process bucket
+
+    Notes
+    -----
+    Weighting: For ATT estimation, pair_weight accounts for both k:1 matching
+    (each control contributes 1/k to its treated patient's estimate) and
+    replacement (controls matched multiple times are down-weighted).
+
+    Round-robin fairness: When with_replacement=False, the algorithm ensures
+    all treated patients receive their 1st-choice match before any receive
+    their 2nd-choice. This prevents early patients from "hoarding" the best
+    controls.
+
+    References
+    ----------
+    Inspired by R's MatchIt package:
+    https://cran.r-project.org/web/packages/MatchIt/vignettes/matching-methods.html
     """
     # Add feature array column for easier manipulation
     persons_features_cohorts = features_df.withColumn(
         "feature_array", vector_to_array(features_col)
     )
+
+    # Validate 1-to-k matching parameters
+    if ratio_k < 1:
+        raise ValueError(f"ratio_k must be >= 1, got {ratio_k}")
+
+    if reuse_max is not None:
+        if reuse_max < 1:
+            raise ValueError(f"reuse_max must be >= 1, got {reuse_max}")
+        if not with_replacement:
+            warnings.warn(
+                "reuse_max is ignored when with_replacement=False",
+                UserWarning
+            )
+
+    if n_neighbors < ratio_k:
+        warnings.warn(
+            f"n_neighbors ({n_neighbors}) < ratio_k ({ratio_k}). "
+            f"Consider increasing n_neighbors to ensure enough candidates.",
+            UserWarning
+        )
 
     # Logging
     if verbose:
@@ -346,6 +408,10 @@ def match(
         [
             StructField(id_col, StringType()),
             StructField("match_" + id_col, StringType()),
+            StructField("match_round", IntegerType()),
+            StructField("treated_k", IntegerType()),
+            StructField("control_usage_count", IntegerType()),
+            StructField("pair_weight", DoubleType()),
             StructField("bucket_num_input_patients", IntegerType()),
             StructField("bucket_seconds", DoubleType()),
         ]
@@ -355,9 +421,11 @@ def match(
         """
         Given a group of input rows (those with the same bucket_id),
         returns a dataframe of source-target matches.
+
+        Supports 1-to-k matching with or without replacement.
         """
         bucket_start_time = time.perf_counter()
-        n = n_neighbors
+        bucket_size = group_df.shape[0]
 
         # Extract the individual cohorts
         needs_matching = group_df.loc[group_df[treatment_col] == 1]
@@ -367,90 +435,194 @@ def match(
         if len(needs_matching) == 0 or len(match_to) == 0:
             return pd.DataFrame(columns=schema_potential_matches_arrays.fieldNames())
 
-        # Update n to size(match_to) if smaller than n
-        n = min(len(match_to), n)
+        # Determine how many neighbors to fetch from k-NN
+        # Need enough candidates for ratio_k rounds
+        n_fetch = min(len(match_to), max(n_neighbors, ratio_k))
 
-        # Always use Euclidean distance (features are pre-transformed for mahalanobis)
-        metric = "euclidean"
-
-        # Extract input pandas dataframe columns to useful types
+        # Extract arrays for k-NN
         person_ids_need_matching = list(needs_matching[id_col])
-        features_need_matching = np.array(list(needs_matching["feature_array"]))  # 2D array
+        features_need_matching = np.array(list(needs_matching["feature_array"]))
         person_ids_match_to = list(match_to[id_col])
-        features_match_to = np.array(list(match_to["feature_array"]))  # 2D array
+        features_match_to = np.array(list(match_to["feature_array"]))
 
-        # Find nearest neighbors for the features needing matching
-        model = NearestNeighbors(metric=metric).fit(features_match_to)
-        neighbors = model.kneighbors(
-            features_need_matching, n_neighbors=n, return_distance=True
+        # Find nearest neighbors
+        model = NearestNeighbors(metric="euclidean").fit(features_match_to)
+        distances, indices = model.kneighbors(
+            features_need_matching, n_neighbors=n_fetch, return_distance=True
         )
 
-        # Lists of neighbors and distances for each person_id
-        match_person_ids = list(
-            map(
-                lambda indices: [person_ids_match_to[i] for i in indices],
-                neighbors[1].tolist(),
-            )
-        )
-        match_distances = neighbors[0].tolist()
+        # Build candidate DataFrame: one row per (treated, control, distance)
+        candidates_list = []
+        for i, treated_id in enumerate(person_ids_need_matching):
+            for j in range(n_fetch):
+                control_idx = indices[i, j]
+                candidates_list.append({
+                    id_col: treated_id,
+                    "match_" + id_col: person_ids_match_to[control_idx],
+                    "_distance": distances[i, j],
+                })
 
-        results = None
-        for person_id, match_ids, match_dists in zip(
-            person_ids_need_matching, match_person_ids, match_distances
-        ):
-            # Broadcast person_id
-            person_id = [person_id] * len(match_ids)
+        if not candidates_list:
+            return pd.DataFrame(columns=schema_potential_matches_arrays.fieldNames())
 
-            # Explode matches to one per row
-            person_matches = np.stack([person_id, match_ids, match_dists], axis=1)
+        match_candidates = pd.DataFrame(candidates_list)
 
-            # Iteratively stack results for each person_id
-            results = (
-                np.vstack([results, person_matches])
-                if results is not None
-                else person_matches
-            )
+        # Rank candidates: for each treated, rank controls by distance
+        match_candidates["_treated_rank"] = match_candidates.groupby(id_col)["_distance"].rank(method="first")
+        # For each control, rank treated by distance (for tie-breaking in without-replacement)
+        match_candidates["_control_rank"] = match_candidates.groupby("match_" + id_col)["_distance"].rank(method="first")
 
-        # Rank candidate matches in both directions and sort
-        match_candidates = pd.DataFrame(
-            results, columns=[id_col, "match_" + id_col, "_distance"]
-        )
-        match_candidates["_distance"] = pd.to_numeric(
-            match_candidates["_distance"]
-        )
-        match_candidates["source_target_rank"] = match_candidates.groupby([id_col])[
-            "_distance"
-        ].rank()
-        match_candidates["target_source_rank"] = match_candidates.groupby(
-            "match_" + id_col
-        )["_distance"].rank(method="first")
-        match_candidates = match_candidates.sort_values(
-            ["source_target_rank", "target_source_rank"]
-        )
+        # ===== MATCHING LOGIC =====
 
-        # Greedy 1-to-1 matching
-        i = 0
-        while len(match_candidates) > i:
-            # Ordering and XOR drop ensures that the ith record always greedily
-            # chooses best source=>target match with ties broken by target=>source match
-            person_id, match_person_id = match_candidates.iloc[i][
-                [id_col, "match_" + id_col]
-            ]
+        if with_replacement:
+            # ----- WITH REPLACEMENT -----
+            # Each treated independently selects their k best controls
+            # Controls can be reused (subject to reuse_max if set)
 
-            # Drop records matching person_id XOR match_person_id
-            match_candidates = match_candidates[
-                ~(
-                    (match_candidates[id_col] == person_id)
-                    ^ (match_candidates["match_" + id_col] == match_person_id)
+            all_matches = []
+            control_usage = {}  # control_id -> usage count
+
+            # Process each treated patient
+            for treated_id in person_ids_need_matching:
+                treated_candidates = match_candidates[
+                    match_candidates[id_col] == treated_id
+                ].sort_values("_treated_rank")
+
+                matches_for_treated = []
+                for _, row in treated_candidates.iterrows():
+                    control_id = row["match_" + id_col]
+
+                    # Check reuse_max constraint
+                    current_usage = control_usage.get(control_id, 0)
+                    if reuse_max is not None and current_usage >= reuse_max:
+                        continue
+
+                    # Record match
+                    matches_for_treated.append({
+                        id_col: treated_id,
+                        "match_" + id_col: control_id,
+                        "match_round": len(matches_for_treated) + 1,
+                        "_distance": row["_distance"],
+                    })
+                    control_usage[control_id] = current_usage + 1
+
+                    if len(matches_for_treated) >= ratio_k:
+                        break
+
+                all_matches.extend(matches_for_treated)
+
+        else:
+            # ----- WITHOUT REPLACEMENT (ROUND-ROBIN) -----
+            # Round 1: all treated get best available match
+            # Round 2: all treated get second best from remaining
+            # ... ensures fairness
+
+            all_matches = []
+            available_controls = set(person_ids_match_to)
+            matched_treated = set()  # Track treated who have been fully matched or failed
+
+            for round_num in range(1, ratio_k + 1):
+                if not available_controls:
+                    break
+
+                # Filter candidates to available controls
+                round_candidates = match_candidates[
+                    match_candidates["match_" + id_col].isin(available_controls) &
+                    ~match_candidates[id_col].isin(matched_treated)
+                ].copy()
+
+                if round_candidates.empty:
+                    break
+
+                # Re-rank within available controls for this round
+                round_candidates["_round_treated_rank"] = round_candidates.groupby(id_col)["_distance"].rank(method="first")
+                round_candidates["_round_control_rank"] = round_candidates.groupby("match_" + id_col)["_distance"].rank(method="first")
+
+                # Sort by treated's preference, then control's preference for tie-breaking
+                round_candidates = round_candidates.sort_values(
+                    ["_round_treated_rank", "_round_control_rank"]
                 )
-            ]
-            i += 1
 
-        match_candidates["bucket_num_input_patients"] = group_df.shape[0]
+                # Greedy 1-to-1 matching for this round
+                round_matches = []
+                used_treated_this_round = set()
+                used_controls_this_round = set()
+
+                for _, row in round_candidates.iterrows():
+                    treated_id = row[id_col]
+                    control_id = row["match_" + id_col]
+
+                    if treated_id in used_treated_this_round:
+                        continue
+                    if control_id in used_controls_this_round:
+                        continue
+
+                    round_matches.append({
+                        id_col: treated_id,
+                        "match_" + id_col: control_id,
+                        "match_round": round_num,
+                        "_distance": row["_distance"],
+                    })
+                    used_treated_this_round.add(treated_id)
+                    used_controls_this_round.add(control_id)
+
+                all_matches.extend(round_matches)
+
+                # Remove used controls from pool
+                available_controls -= used_controls_this_round
+
+                # Track treated who didn't get a match this round (they won't in future rounds either)
+                treated_without_match = set(person_ids_need_matching) - used_treated_this_round - matched_treated
+                # If a treated patient couldn't get a match this round, they're done
+                for tid in treated_without_match:
+                    # Check if they had any candidates
+                    had_candidates = round_candidates[round_candidates[id_col] == tid].shape[0] > 0
+                    if not had_candidates:
+                        matched_treated.add(tid)
+
+        # ===== POST-PROCESSING =====
+
+        if not all_matches:
+            return pd.DataFrame(columns=schema_potential_matches_arrays.fieldNames())
+
+        result_df = pd.DataFrame(all_matches)
+
+        # Compute treated_k: how many matches each treated patient got
+        result_df["treated_k"] = result_df.groupby(id_col)[id_col].transform("count")
+
+        # Compute control_usage_count: how many times each control was used
+        result_df["control_usage_count"] = result_df.groupby("match_" + id_col)["match_" + id_col].transform("count")
+
+        # Compute pair_weight for downstream analysis
+        result_df["pair_weight"] = 1.0 / (result_df["treated_k"] * result_df["control_usage_count"])
+
+        # Handle require_k: filter out treated patients with fewer than k matches
+        if require_k and ratio_k > 1:
+            result_df = result_df[result_df["treated_k"] >= ratio_k]
+            # Recompute control_usage_count after filtering
+            if len(result_df) > 0:
+                result_df["control_usage_count"] = result_df.groupby("match_" + id_col)["match_" + id_col].transform("count")
+                result_df["pair_weight"] = 1.0 / (result_df["treated_k"] * result_df["control_usage_count"])
+
+        # Add bucket metadata
+        result_df["bucket_num_input_patients"] = bucket_size
 
         bucket_end_time = time.perf_counter()
-        match_candidates["bucket_seconds"] = bucket_end_time - bucket_start_time
-        return match_candidates.drop(columns=["source_target_rank", "target_source_rank", "_distance"])
+        result_df["bucket_seconds"] = bucket_end_time - bucket_start_time
+
+        # Select and order output columns
+        output_cols = [
+            id_col,
+            "match_" + id_col,
+            "match_round",
+            "treated_k",
+            "control_usage_count",
+            "pair_weight",
+            "bucket_num_input_patients",
+            "bucket_seconds",
+        ]
+
+        return result_df[output_cols]
 
     # Find matches for each bucket
     matches = (
@@ -467,17 +639,26 @@ def match(
         cohort_counts = persons_features_cohorts.groupBy(treatment_col).count().toPandas()
         n_treated = int(cohort_counts[cohort_counts[treatment_col] == 1]["count"].iloc[0]) if len(cohort_counts[cohort_counts[treatment_col] == 1]) > 0 else 0
         n_control = int(cohort_counts[cohort_counts[treatment_col] == 0]["count"].iloc[0]) if len(cohort_counts[cohort_counts[treatment_col] == 0]) > 0 else 0
-        n_matched = matches.count()
+
+        # Count pairs, unique treated, and unique controls
+        n_matched_pairs = matches.count()
+        n_matched_treated = matches.select(id_col).distinct().count()
+        n_unique_controls_used = matches.select("match_" + id_col).distinct().count()
 
         _print_match_summary(
             feature_space=feature_space,
             n_treated=n_treated,
             n_control=n_control,
-            n_matched=n_matched,
+            n_matched_pairs=n_matched_pairs,
+            n_matched_treated=n_matched_treated,
             bucket_length=bucket_length,
             num_hash_tables=num_hash_tables,
             whitening_info=whitening_info,
             num_buckets=num_buckets,
+            ratio_k=ratio_k,
+            with_replacement=with_replacement,
+            reuse_max=reuse_max,
+            n_unique_controls_used=n_unique_controls_used,
         )
 
     return matches
@@ -487,15 +668,30 @@ def _print_match_summary(
     feature_space: str,
     n_treated: int,
     n_control: int,
-    n_matched: int,
+    n_matched_pairs: int,
+    n_matched_treated: int,
     bucket_length: float,
     num_hash_tables: int,
     whitening_info: Optional[Tuple[int, int]] = None,
     num_buckets: int = 0,
     warn_threshold: float = 0.5,
+    # New parameters:
+    ratio_k: int = 1,
+    with_replacement: bool = False,
+    reuse_max: Optional[int] = None,
+    n_unique_controls_used: int = 0,
 ) -> None:
     """Print MatchIt-style summary of matching results."""
-    print("\nBRPMatch: 1:1 nearest neighbor matching via LSH")
+
+    # Header with ratio
+    print(f"\nBRPMatch: 1:{ratio_k} nearest neighbor matching via LSH")
+
+    # Replacement info
+    if with_replacement:
+        reuse_str = f", reuse_max={reuse_max}" if reuse_max else ", unlimited reuse"
+        print(f" - replacement: with replacement{reuse_str}")
+    else:
+        print(f" - replacement: without replacement (round-robin)")
 
     # Feature space info
     if feature_space == "mahalanobis" and whitening_info:
@@ -514,8 +710,13 @@ def _print_match_summary(
     print(f"     control: {n_control}")
 
     # Match results
-    match_rate = (n_matched / n_treated) if n_treated > 0 else 0
-    print(f" - matched: {n_matched} pairs ({match_rate*100:.1f}% of treated)")
+    match_rate = (n_matched_treated / n_treated) if n_treated > 0 else 0
+    avg_controls = (n_matched_pairs / n_matched_treated) if n_matched_treated > 0 else 0
+
+    print(f" - matched: {n_matched_pairs} pairs across {n_matched_treated} treated ({match_rate*100:.1f}% of treated)")
+    if ratio_k > 1:
+        print(f"     mean controls per treated: {avg_controls:.2f}")
+    print(f"     unique controls used: {n_unique_controls_used} (of {n_control} available)")
 
     # Warn if match rate is low
     if match_rate < warn_threshold:
