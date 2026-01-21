@@ -2,6 +2,15 @@
 
 default: help
 
+# Java 17 is required for local Spark (Java 23+ has Arrow compatibility issues)
+# macOS (Homebrew): brew install openjdk@17
+# Linux: apt install openjdk-17-jdk or equivalent
+JAVA_HOME_MACOS := /opt/homebrew/opt/openjdk@17
+JAVA_HOME_LINUX := /usr/lib/jvm/java-17-openjdk-amd64
+
+# Auto-detect: use JAVA_HOME if set, otherwise try macOS path, then Linux path
+JAVA_HOME ?= $(shell if [ -d "$(JAVA_HOME_MACOS)" ]; then echo "$(JAVA_HOME_MACOS)"; elif [ -d "$(JAVA_HOME_LINUX)" ]; then echo "$(JAVA_HOME_LINUX)"; fi)
+
 help:
 	@echo "Common development commands:"
 	@echo "  make install      - Install all dependencies"
@@ -15,6 +24,10 @@ help:
 	@echo "  make check        - Check build with twine"
 	@echo "  make publish-test - Upload to TestPyPI"
 	@echo "  make publish      - Upload to PyPI (live, not test)"
+	@echo ""
+	@echo "Note: Java 17 required for local Spark. Install with:"
+	@echo "  macOS: brew install openjdk@17"
+	@echo "  Linux: apt install openjdk-17-jdk"
 
 install:
 	poetry install
@@ -27,13 +40,13 @@ clean:
 	rm -rf dist/ build/ *.egg-info
 
 test:
-	poetry run pytest tests/ -v
+	JAVA_HOME=$(JAVA_HOME) poetry run pytest tests/ -v
 
 test-quick:
-	poetry run pytest tests/ -v -x --tb=short
+	JAVA_HOME=$(JAVA_HOME) poetry run pytest tests/ -v -x --tb=short
 
 example:
-	poetry run python example/example.py
+	JAVA_HOME=$(JAVA_HOME) poetry run python example/example.py
 
 zip: clean build
 	mkdir -p dist

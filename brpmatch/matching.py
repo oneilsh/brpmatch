@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pyspark.sql.functions as F
 from pyspark.ml import Pipeline
-from pyspark.ml.feature import BucketedRandomProjectionLSH
+from pyspark.ml.feature import BucketedRandomProjectionLSH, Normalizer
 from pyspark.ml.functions import vector_to_array
 from pyspark.mllib.linalg import Vectors, VectorUDT
 from pyspark.mllib.linalg.distributed import RowMatrix
@@ -147,6 +147,16 @@ def match(
             "feature_array", vector_to_array(features_col)
         )
 
+    # L2 normalize feature vectors to unit length for better LSH bucket sizing
+    # Use Spark's built-in Normalizer for efficiency at scale
+    normalizer = Normalizer(inputCol=features_col, outputCol="_normalized_features", p=2.0)
+    persons_features_cohorts = (
+        normalizer.transform(persons_features_cohorts)
+        .drop(features_col)
+        .withColumnRenamed("_normalized_features", features_col)
+        .withColumn("feature_array", vector_to_array(features_col))
+    )
+
     # Compute bucket length if not provided: N^(-1/d)
     if bucket_length is None:
         feature_cnt = (
@@ -154,7 +164,9 @@ def match(
             .select(F.size(F.col("feature_array")))
             .collect()[0][0]
         )
-        bucket_length = pow(persons_features_cohorts.count(), (-1 / feature_cnt))
+        # https://spark.apache.org/docs/latest/api/scala/org/apache/spark/ml/feature/BucketedRandomProjectionLSH.html
+        # "If input vectors are normalized, 1-10 times of pow(numRecords, -1/inputDim) would be a reasonable value"
+        bucket_length = 5 * pow(persons_features_cohorts.count(), (-1 / feature_cnt))
 
     # Create 4 levels of LSH buckets with progressively smaller bucket lengths
     bucket_stages = [

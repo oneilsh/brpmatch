@@ -427,9 +427,13 @@ Both statistics are computed before (unadjusted) and after (adjusted) matching.
 
 ### Software
 - **Python** >= 3.10
-- **Java** >= 11 (required by PySpark - check with `java -version`)
-  - PySpark needs Java to run, even in local mode
-  - If you don't have Java: `brew install openjdk` (Mac) or download from [Adoptium](https://adoptium.net/)
+- **Java** (required by PySpark - check with `java -version`)
+  - **Local development/testing**: Java 17 recommended
+    - macOS: `brew install openjdk@17`
+    - Linux: `apt install openjdk-17-jdk`
+    - Other: Download from [Adoptium](https://adoptium.net/)
+  - **Managed environments** (Databricks, EMR, Dataproc, etc.): Java version handled automatically
+  - **Note**: Java 23+ has Arrow compatibility issues with PySpark 3.5 - use Java 17 or 21 for local testing
 
 ### Python Packages
 All installed automatically with `pip install brpmatch`:
@@ -441,12 +445,14 @@ All installed automatically with `pip install brpmatch`:
 - pandas >= 1.3
 - matplotlib >= 3.5
 
-**Note for Java 17+**: When using Java 17 or newer (for local examples and development), add these configuration options to your SparkSession; PySpark uses them for certain operations and they are disabled by default in newer Java:
+**Java Configuration Note**: When running locally (not in managed environments), add these configuration options to your SparkSession:
 
 ```python
 .config("spark.driver.extraJavaOptions", "-Djava.security.manager=allow")
 .config("spark.executor.extraJavaOptions", "-Djava.security.manager=allow")
 ```
+
+These options enable certain Java security features required by PySpark and are disabled by default in Java 17+.
 
 ## License
 
