@@ -33,7 +33,7 @@ test-quick:
 	poetry run pytest tests/ -v -x --tb=short
 
 example:
-	poetry run python scripts/example.py
+	poetry run python example/example.py
 
 zip: clean build
 	mkdir -p dist

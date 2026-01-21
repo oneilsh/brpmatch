@@ -11,7 +11,6 @@ from typing import Literal, Optional
 import numpy as np
 import pandas as pd
 import pyspark.sql.functions as F
-from numpy.linalg import pinv
 from pyspark.ml import Pipeline
 from pyspark.ml.feature import BucketedRandomProjectionLSH
 from pyspark.ml.functions import vector_to_array
@@ -25,13 +24,12 @@ from pyspark.sql.types import (
     StructField,
     StructType,
 )
-from scipy.spatial.distance import mahalanobis
 from sklearn.neighbors import NearestNeighbors
 
 
 def match(
     features_df: DataFrame,
-    distance_metric: Literal["euclidean", "mahalanobis"] = "euclidean",
+    feature_space: Literal["euclidean", "mahalanobis"] = "euclidean",
     n_neighbors: int = 5,
     bucket_length: Optional[float] = None,
     num_hash_tables: int = 4,
@@ -57,8 +55,11 @@ def match(
     ----------
     features_df : DataFrame
         Output from generate_features() containing 'features' column
-    distance_metric : Literal["euclidean", "mahalanobis"]
-        Distance metric for k-NN within buckets
+    feature_space : Literal["euclidean", "mahalanobis"]
+        Feature space for bucketing and matching. "euclidean" uses original
+        features with Euclidean distance. "mahalanobis" applies a whitening
+        transform so that Euclidean distance in transformed space equals
+        Mahalanobis distance in original space.
     n_neighbors : int
         Number of nearest neighbors to consider per treated patient
     bucket_length : Optional[float]
@@ -82,7 +83,6 @@ def match(
         DataFrame with columns:
         - {id_col}: treated patient ID
         - match_{id_col}: matched control patient ID
-        - match_distance: distance between matched pair
         - bucket_num_input_patients: size of bucket where match was found
         - bucket_seconds: time to process bucket
     """
@@ -94,6 +94,58 @@ def match(
     # Logging
     print("Pre-filter")
     print(persons_features_cohorts.groupBy(treatment_col).count().toPandas())
+
+    # Compute whitening transform for mahalanobis feature space
+    whitening_matrix = None
+    if feature_space == "mahalanobis":
+        # Convert ML vectors to MLlib vectors for RowMatrix
+        vec_converter_udf = F.udf(lambda v: Vectors.dense(v.toArray()), VectorUDT())
+        features_for_cov = persons_features_cohorts.withColumn(
+            "features_mllib", vec_converter_udf(features_col)
+        ).select("features_mllib")
+
+        # Compute covariance matrix using distributed RowMatrix
+        # Note: computeCovariance() handles centering internally
+        cov_matrix = RowMatrix(features_for_cov.rdd.map(lambda row: row[0])).computeCovariance().toArray()
+
+        # Eigendecomposition of symmetric covariance matrix
+        # eigh returns eigenvalues in ascending order, eigenvectors as columns
+        eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
+
+        # Filter near-zero eigenvalues for numerical stability
+        # These represent directions with no variance (collinearity)
+        eigenvalue_threshold = 1e-10
+        valid_mask = eigenvalues > eigenvalue_threshold
+        eigenvalues_filtered = eigenvalues[valid_mask]
+        eigenvectors_filtered = eigenvectors[:, valid_mask]
+
+        # Compute whitening matrix: W = Λ^(-1/2) @ V^T
+        # This transforms features so Euclidean distance = Mahalanobis distance
+        inv_sqrt_eigenvalues = np.diag(1.0 / np.sqrt(eigenvalues_filtered))
+        whitening_matrix = inv_sqrt_eigenvalues @ eigenvectors_filtered.T
+
+        print(f"Whitening transform: {cov_matrix.shape[0]} features -> {whitening_matrix.shape[0]} components")
+        print(f"Filtered {np.sum(~valid_mask)} near-zero eigenvalues")
+
+        # Broadcast whitening matrix to all workers
+        spark_context = persons_features_cohorts.sparkSession.sparkContext
+        whitening_matrix_bc = spark_context.broadcast(whitening_matrix)
+
+        # UDF to apply whitening transform: z = W @ x
+        from pyspark.ml.linalg import Vectors as MLVectors, VectorUDT as MLVectorUDT
+
+        @F.udf(MLVectorUDT())
+        def apply_whitening(feature_vector):
+            x = np.array(feature_vector.toArray())
+            z = whitening_matrix_bc.value @ x
+            return MLVectors.dense(z.tolist())
+
+        # Transform features and update feature_array
+        persons_features_cohorts = persons_features_cohorts.withColumn(
+            features_col, apply_whitening(F.col(features_col))
+        ).withColumn(
+            "feature_array", vector_to_array(features_col)
+        )
 
     # Compute bucket length if not provided: N^(-1/d)
     if bucket_length is None:
@@ -269,27 +321,11 @@ def match(
     # Log bucket statistics for parameter tuning
     _log_bucket_stats(persons_bucketed, id_col)
 
-    # Define covariance matrix and distance function for Mahalanobis
-    if distance_metric == "mahalanobis":
-        # Compute the pseudoinverse of the covariance matrix for features
-        vec_converter_udf = F.udf(lambda v: Vectors.dense(v.toArray()), VectorUDT())
-        features_converted = persons_features_cohorts.withColumn(
-            "features_converted", vec_converter_udf(features_col)
-        ).select("features_converted")
-        inverse_covariance_mat = pinv(
-            RowMatrix(features_converted).computeCovariance().toArray()
-        )
-
-        def mahal_dist(vec1, vec2):
-            """Custom distance function using globally-computed inverse covariance matrix"""
-            return mahalanobis(vec1, vec2, inverse_covariance_mat)
-
     # Schema for return from pandas UDF
     schema_potential_matches_arrays = StructType(
         [
             StructField(id_col, StringType()),
             StructField("match_" + id_col, StringType()),
-            StructField("match_distance", DoubleType()),
             StructField("bucket_num_input_patients", IntegerType()),
             StructField("bucket_seconds", DoubleType()),
         ]
@@ -314,16 +350,8 @@ def match(
         # Update n to size(match_to) if smaller than n
         n = min(len(match_to), n)
 
-        # Set distance metric for NN model
-        if distance_metric == "euclidean":
-            metric = distance_metric
-        elif distance_metric == "mahalanobis":
-            metric = mahal_dist
-        else:
-            raise ValueError(
-                f"Within-bucket distance metric must be one of 'euclidean' or "
-                f"'mahalanobis'. Got '{distance_metric}'."
-            )
+        # Always use Euclidean distance (features are pre-transformed for mahalanobis)
+        metric = "euclidean"
 
         # Extract input pandas dataframe columns to useful types
         person_ids_need_matching = list(needs_matching[id_col])
@@ -365,17 +393,17 @@ def match(
 
         # Rank candidate matches in both directions and sort
         match_candidates = pd.DataFrame(
-            results, columns=[id_col, "match_" + id_col, "match_distance"]
+            results, columns=[id_col, "match_" + id_col, "_distance"]
         )
-        match_candidates["match_distance"] = pd.to_numeric(
-            match_candidates["match_distance"]
+        match_candidates["_distance"] = pd.to_numeric(
+            match_candidates["_distance"]
         )
         match_candidates["source_target_rank"] = match_candidates.groupby([id_col])[
-            "match_distance"
+            "_distance"
         ].rank()
         match_candidates["target_source_rank"] = match_candidates.groupby(
             "match_" + id_col
-        )["match_distance"].rank(method="first")
+        )["_distance"].rank(method="first")
         match_candidates = match_candidates.sort_values(
             ["source_target_rank", "target_source_rank"]
         )
@@ -402,7 +430,7 @@ def match(
 
         bucket_end_time = time.perf_counter()
         match_candidates["bucket_seconds"] = bucket_end_time - bucket_start_time
-        return match_candidates.drop(columns=["source_target_rank", "target_source_rank"])
+        return match_candidates.drop(columns=["source_target_rank", "target_source_rank", "_distance"])
 
     # Find matches for each bucket
     matches = (
