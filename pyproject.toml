@@ -29,3 +29,9 @@ build-backend = "poetry.core.masonry.api"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+filterwarnings = [
+    # Suppress PySpark's internal socket warnings (cleaned up on session stop)
+    "ignore::ResourceWarning",
+    # Suppress PySpark's distutils deprecation warnings (external dependency issue)
+    "ignore:distutils Version classes are deprecated:DeprecationWarning",
+]

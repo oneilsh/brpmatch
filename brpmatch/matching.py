@@ -6,7 +6,6 @@ between treated and control cohorts.
 """
 
 import time
-import warnings
 from typing import Literal, Optional, Tuple
 
 import numpy as np
@@ -18,6 +17,8 @@ from pyspark.ml.functions import vector_to_array
 from pyspark.mllib.linalg import Vectors, VectorUDT
 from pyspark.mllib.linalg.distributed import RowMatrix
 from pyspark.sql import DataFrame
+
+from .warnings_util import warn
 from pyspark.sql.types import (
     DoubleType,
     IntegerType,
@@ -28,6 +29,36 @@ from pyspark.sql.types import (
 from sklearn.neighbors import NearestNeighbors
 
 
+def _discover_id_column(df: DataFrame) -> str:
+    """Find the ID column by looking for __id suffix."""
+    id_cols = [c for c in df.columns if c.endswith("__id")]
+    if len(id_cols) != 1:
+        raise ValueError(
+            f"Expected exactly one column ending with '__id', found: {id_cols}"
+        )
+    return id_cols[0]
+
+
+def _discover_treatment_column(df: DataFrame) -> str:
+    """Find the treatment column by looking for __treat suffix."""
+    treat_cols = [c for c in df.columns if c.endswith("__treat")]
+    if len(treat_cols) != 1:
+        raise ValueError(
+            f"Expected exactly one column ending with '__treat', found: {treat_cols}"
+        )
+    return treat_cols[0]
+
+
+def _discover_exact_match_column(df: DataFrame) -> str:
+    """Find the exact match grouping column by looking for __group suffix."""
+    group_cols = [c for c in df.columns if c.endswith("__group")]
+    if len(group_cols) != 1:
+        raise ValueError(
+            f"Expected exactly one column ending with '__group', found: {group_cols}"
+        )
+    return group_cols[0]
+
+
 def match(
     features_df: DataFrame,
     feature_space: Literal["euclidean", "mahalanobis"] = "euclidean",
@@ -36,9 +67,6 @@ def match(
     num_hash_tables: int = 4,
     num_patients_trigger_rebucket: int = 10000,
     features_col: str = "features",
-    treatment_col: str = "treat",
-    id_col: str = "person_id",
-    exact_match_col: str = "exact_match_id",
     verbose: bool = True,
     # New parameters for 1-to-k matching:
     ratio_k: int = 1,
@@ -79,12 +107,6 @@ def match(
         Threshold for bucket size triggering finer bucketing
     features_col : str
         Name of the feature vector column
-    treatment_col : str
-        Name of the treatment indicator column (1=treated, 0=control)
-    id_col : str
-        Patient identifier column name
-    exact_match_col : str
-        Column for exact matching stratification
     verbose : bool
         If True, print progress and summary information
     ratio_k : int
@@ -107,14 +129,19 @@ def match(
     -------
     DataFrame
         DataFrame with columns:
-        - {id_col}: treated patient ID
-        - match_{id_col}: matched control patient ID
+        - {id_col_base}: treated patient ID (e.g., "person_id")
+        - match_{id_col_base}: matched control patient ID
         - match_round: which round this match came from (1=best, 2=second best, etc.)
         - treated_k: total matches for this treated patient
         - control_usage_count: times this control was matched (always 1 if without replacement)
         - pair_weight: weight for analysis = 1/(treated_k * control_usage_count)
         - bucket_num_input_patients: size of bucket where match was found
         - bucket_seconds: time to process bucket
+
+        Note: Column names are auto-discovered from features_df using suffix conventions:
+        - ID column: ends with __id
+        - Treatment column: ends with __treat
+        - Exact match grouping: ends with __group
 
     Notes
     -----
@@ -132,6 +159,14 @@ def match(
     Inspired by R's MatchIt package:
     https://cran.r-project.org/web/packages/MatchIt/vignettes/matching-methods.html
     """
+    # Auto-discover columns from naming convention
+    id_col = _discover_id_column(features_df)
+    treatment_col = _discover_treatment_column(features_df)
+    exact_match_col = _discover_exact_match_column(features_df)
+
+    # Extract base ID name for output columns (e.g., "person_id" from "person_id__id")
+    id_col_base = id_col.replace("__id", "")
+
     # Add feature array column for easier manipulation
     persons_features_cohorts = features_df.withColumn(
         "feature_array", vector_to_array(features_col)
@@ -145,16 +180,12 @@ def match(
         if reuse_max < 1:
             raise ValueError(f"reuse_max must be >= 1, got {reuse_max}")
         if not with_replacement:
-            warnings.warn(
-                "reuse_max is ignored when with_replacement=False",
-                UserWarning
-            )
+            warn("reuse_max is ignored when with_replacement=False")
 
     if n_neighbors < ratio_k:
-        warnings.warn(
+        warn(
             f"n_neighbors ({n_neighbors}) < ratio_k ({ratio_k}). "
-            f"Consider increasing n_neighbors to ensure enough candidates.",
-            UserWarning
+            f"Consider increasing n_neighbors to ensure enough candidates."
         )
 
     # Logging
@@ -404,10 +435,11 @@ def match(
     num_buckets = _log_bucket_stats(persons_bucketed, id_col, verbose=verbose)
 
     # Schema for return from pandas UDF
+    # Use base name without __id suffix for cleaner output
     schema_potential_matches_arrays = StructType(
         [
-            StructField(id_col, StringType()),
-            StructField("match_" + id_col, StringType()),
+            StructField(id_col_base, StringType()),
+            StructField("match_" + id_col_base, StringType()),
             StructField("match_round", IntegerType()),
             StructField("treated_k", IntegerType()),
             StructField("control_usage_count", IntegerType()),
@@ -440,6 +472,9 @@ def match(
         n_fetch = min(len(match_to), max(n_neighbors, ratio_k))
 
         # Extract arrays for k-NN
+        # Note: id_col has __id suffix, id_col_base doesn't
+        # We use id_col for reading from group_df (which has original features_df columns)
+        # But write using id_col_base in output
         person_ids_need_matching = list(needs_matching[id_col])
         features_need_matching = np.array(list(needs_matching["feature_array"]))
         person_ids_match_to = list(match_to[id_col])
@@ -452,13 +487,14 @@ def match(
         )
 
         # Build candidate DataFrame: one row per (treated, control, distance)
+        # Use id_col_base for output column names
         candidates_list = []
         for i, treated_id in enumerate(person_ids_need_matching):
             for j in range(n_fetch):
                 control_idx = indices[i, j]
                 candidates_list.append({
-                    id_col: treated_id,
-                    "match_" + id_col: person_ids_match_to[control_idx],
+                    id_col_base: treated_id,
+                    "match_" + id_col_base: person_ids_match_to[control_idx],
                     "_distance": distances[i, j],
                 })
 
@@ -468,9 +504,9 @@ def match(
         match_candidates = pd.DataFrame(candidates_list)
 
         # Rank candidates: for each treated, rank controls by distance
-        match_candidates["_treated_rank"] = match_candidates.groupby(id_col)["_distance"].rank(method="first")
+        match_candidates["_treated_rank"] = match_candidates.groupby(id_col_base)["_distance"].rank(method="first")
         # For each control, rank treated by distance (for tie-breaking in without-replacement)
-        match_candidates["_control_rank"] = match_candidates.groupby("match_" + id_col)["_distance"].rank(method="first")
+        match_candidates["_control_rank"] = match_candidates.groupby("match_" + id_col_base)["_distance"].rank(method="first")
 
         # ===== MATCHING LOGIC =====
 
@@ -485,12 +521,12 @@ def match(
             # Process each treated patient
             for treated_id in person_ids_need_matching:
                 treated_candidates = match_candidates[
-                    match_candidates[id_col] == treated_id
+                    match_candidates[id_col_base] == treated_id
                 ].sort_values("_treated_rank")
 
                 matches_for_treated = []
                 for _, row in treated_candidates.iterrows():
-                    control_id = row["match_" + id_col]
+                    control_id = row["match_" + id_col_base]
 
                     # Check reuse_max constraint
                     current_usage = control_usage.get(control_id, 0)
@@ -499,8 +535,8 @@ def match(
 
                     # Record match
                     matches_for_treated.append({
-                        id_col: treated_id,
-                        "match_" + id_col: control_id,
+                        id_col_base: treated_id,
+                        "match_" + id_col_base: control_id,
                         "match_round": len(matches_for_treated) + 1,
                         "_distance": row["_distance"],
                     })
@@ -527,16 +563,16 @@ def match(
 
                 # Filter candidates to available controls
                 round_candidates = match_candidates[
-                    match_candidates["match_" + id_col].isin(available_controls) &
-                    ~match_candidates[id_col].isin(matched_treated)
+                    match_candidates["match_" + id_col_base].isin(available_controls) &
+                    ~match_candidates[id_col_base].isin(matched_treated)
                 ].copy()
 
                 if round_candidates.empty:
                     break
 
                 # Re-rank within available controls for this round
-                round_candidates["_round_treated_rank"] = round_candidates.groupby(id_col)["_distance"].rank(method="first")
-                round_candidates["_round_control_rank"] = round_candidates.groupby("match_" + id_col)["_distance"].rank(method="first")
+                round_candidates["_round_treated_rank"] = round_candidates.groupby(id_col_base)["_distance"].rank(method="first")
+                round_candidates["_round_control_rank"] = round_candidates.groupby("match_" + id_col_base)["_distance"].rank(method="first")
 
                 # Sort by treated's preference, then control's preference for tie-breaking
                 round_candidates = round_candidates.sort_values(
@@ -549,8 +585,8 @@ def match(
                 used_controls_this_round = set()
 
                 for _, row in round_candidates.iterrows():
-                    treated_id = row[id_col]
-                    control_id = row["match_" + id_col]
+                    treated_id = row[id_col_base]
+                    control_id = row["match_" + id_col_base]
 
                     if treated_id in used_treated_this_round:
                         continue
@@ -558,8 +594,8 @@ def match(
                         continue
 
                     round_matches.append({
-                        id_col: treated_id,
-                        "match_" + id_col: control_id,
+                        id_col_base: treated_id,
+                        "match_" + id_col_base: control_id,
                         "match_round": round_num,
                         "_distance": row["_distance"],
                     })
@@ -576,7 +612,7 @@ def match(
                 # If a treated patient couldn't get a match this round, they're done
                 for tid in treated_without_match:
                     # Check if they had any candidates
-                    had_candidates = round_candidates[round_candidates[id_col] == tid].shape[0] > 0
+                    had_candidates = round_candidates[round_candidates[id_col_base] == tid].shape[0] > 0
                     if not had_candidates:
                         matched_treated.add(tid)
 
@@ -588,10 +624,10 @@ def match(
         result_df = pd.DataFrame(all_matches)
 
         # Compute treated_k: how many matches each treated patient got
-        result_df["treated_k"] = result_df.groupby(id_col)[id_col].transform("count")
+        result_df["treated_k"] = result_df.groupby(id_col_base)[id_col_base].transform("count")
 
         # Compute control_usage_count: how many times each control was used
-        result_df["control_usage_count"] = result_df.groupby("match_" + id_col)["match_" + id_col].transform("count")
+        result_df["control_usage_count"] = result_df.groupby("match_" + id_col_base)["match_" + id_col_base].transform("count")
 
         # Compute pair_weight for downstream analysis
         result_df["pair_weight"] = 1.0 / (result_df["treated_k"] * result_df["control_usage_count"])
@@ -601,7 +637,7 @@ def match(
             result_df = result_df[result_df["treated_k"] >= ratio_k]
             # Recompute control_usage_count after filtering
             if len(result_df) > 0:
-                result_df["control_usage_count"] = result_df.groupby("match_" + id_col)["match_" + id_col].transform("count")
+                result_df["control_usage_count"] = result_df.groupby("match_" + id_col_base)["match_" + id_col_base].transform("count")
                 result_df["pair_weight"] = 1.0 / (result_df["treated_k"] * result_df["control_usage_count"])
 
         # Add bucket metadata
@@ -612,8 +648,8 @@ def match(
 
         # Select and order output columns
         output_cols = [
-            id_col,
-            "match_" + id_col,
+            id_col_base,
+            "match_" + id_col_base,
             "match_round",
             "treated_k",
             "control_usage_count",
@@ -633,7 +669,7 @@ def match(
         .applyInPandas(find_neighbors, schema=schema_potential_matches_arrays)
     )
 
-    # Print match summary if verbose
+    # Print match summary
     if verbose:
         # Count treated, control, and matched
         cohort_counts = persons_features_cohorts.groupBy(treatment_col).count().toPandas()
@@ -642,8 +678,8 @@ def match(
 
         # Count pairs, unique treated, and unique controls
         n_matched_pairs = matches.count()
-        n_matched_treated = matches.select(id_col).distinct().count()
-        n_unique_controls_used = matches.select("match_" + id_col).distinct().count()
+        n_matched_treated = matches.select(id_col_base).distinct().count()
+        n_unique_controls_used = matches.select("match_" + id_col_base).distinct().count()
 
         _print_match_summary(
             feature_space=feature_space,
@@ -720,10 +756,9 @@ def _print_match_summary(
 
     # Warn if match rate is low
     if match_rate < warn_threshold:
-        warnings.warn(
+        warn(
             f"Low match rate: only {match_rate*100:.1f}% of treated units were matched. "
-            f"Consider adjusting bucket_length or num_hash_tables parameters.",
-            UserWarning
+            f"Consider adjusting bucket_length or num_hash_tables parameters."
         )
 
 

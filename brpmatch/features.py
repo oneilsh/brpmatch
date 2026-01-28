@@ -4,17 +4,86 @@ Feature generation for BRPMatch cohort matching.
 This module converts patient data into feature vectors for matching.
 """
 
-from typing import List, Optional
+import re
+from typing import List, Optional, Tuple
 
 import pyspark.sql.functions as F
 from pyspark.ml import Pipeline
-from pyspark.ml.feature import (
-    OneHotEncoder,
-    StandardScaler,
-    StringIndexer,
-    VectorAssembler,
-)
+from pyspark.ml.feature import StandardScaler, VectorAssembler
 from pyspark.sql import DataFrame, SparkSession
+
+# Default maximum categories (can be overridden via parameter)
+DEFAULT_MAX_CATEGORIES = 20
+
+
+def _sanitize_value(value: str) -> str:
+    """
+    Sanitize a categorical value for use in column names.
+
+    - Lowercase
+    - Replace spaces and special chars with underscore
+    - Collapse multiple underscores
+    - Strip leading/trailing underscores
+    """
+    result = str(value).lower()
+    # Replace spaces and problematic characters with underscore
+    result = re.sub(r'[\s/\\.\-\(\)\[\]\{\}:;,\'"]+', '_', result)
+    # Collapse multiple underscores
+    result = re.sub(r'_+', '_', result)
+    # Strip leading/trailing underscores
+    result = result.strip('_')
+    return result
+
+
+def _create_onehot_columns(
+    df: DataFrame,
+    col: str,
+    suffix: str = "__cat",
+    max_categories: int = DEFAULT_MAX_CATEGORIES,
+) -> Tuple[DataFrame, List[str]]:
+    """
+    Create one-hot encoded columns for a categorical column.
+
+    Args:
+        df: Input DataFrame
+        col: Categorical column name
+        suffix: Suffix for generated columns (__cat or __exact)
+        max_categories: Maximum allowed distinct values (raises error if exceeded)
+
+    Returns:
+        Tuple of (DataFrame with new columns, list of new column names)
+
+    Raises:
+        ValueError: If the column has more distinct values than max_categories
+    """
+    # Get distinct values (sorted for deterministic ordering)
+    distinct_values = [
+        row[col] for row in df.select(col).distinct().collect()
+        if row[col] is not None
+    ]
+    distinct_values = sorted([str(v) for v in distinct_values])
+
+    # Check cardinality
+    if len(distinct_values) > max_categories:
+        raise ValueError(
+            f"Column '{col}' has {len(distinct_values)} distinct values, "
+            f"which exceeds max_categories={max_categories}. "
+            f"High-cardinality categorical columns are not suitable for matching. "
+            f"Consider binning the values, using it as a numeric column, "
+            f"or increasing max_categories if you're sure this is intended."
+        )
+
+    new_cols = []
+    for val in distinct_values:
+        sanitized = _sanitize_value(val)
+        new_col_name = f"{col}_{sanitized}{suffix}"
+        df = df.withColumn(
+            new_col_name,
+            F.when(F.col(col) == val, 1.0).otherwise(0.0)
+        )
+        new_cols.append(new_col_name)
+
+    return df, new_cols
 
 
 def generate_features(
@@ -28,6 +97,7 @@ def generate_features(
     exact_match_cols: Optional[List[str]] = None,
     date_reference: str = "1970-01-01",
     id_col: str = "person_id",
+    max_categories: int = DEFAULT_MAX_CATEGORIES,
     verbose: bool = True,
 ) -> DataFrame:
     """
@@ -35,10 +105,19 @@ def generate_features(
 
     This function processes input data through multiple transformations:
     1. Converts dates to numeric (days from reference date)
-    2. Creates exact match stratification IDs
+    2. Creates exact match stratification groups
     3. One-hot encodes categorical variables
-    4. Standardizes features
-    5. Creates treatment indicator
+    4. Creates feature vectors for matching
+
+    Output DataFrame columns use a suffix-based naming convention:
+    - {id_col}__id: Patient identifier
+    - treat__treat: Treatment indicator (0/1)
+    - {cat_col}_{value}__cat: One-hot encoded categorical features
+    - {exact_col}_{value}__exact: One-hot encoded exact match features
+    - {num_col}__num: Numeric features
+    - {date_col}__date: Date features (days from reference)
+    - exact_match__group: Composite exact match grouping ID
+    - features: Assembled feature vector for LSH
 
     Parameters
     ----------
@@ -59,25 +138,24 @@ def generate_features(
     date_cols : Optional[List[str]]
         Date columns to convert to numeric (days from date_reference). Optional.
     exact_match_cols : Optional[List[str]]
-        Categorical columns to use for exact matching stratification. Requires
-        categorical_cols to be provided. Optional.
+        Categorical columns to use for exact matching stratification. Optional.
     date_reference : str
         Reference date for converting date columns to numeric
     id_col : str
         Patient identifier column name
+    max_categories : int
+        Maximum number of distinct values allowed per categorical column.
+        High-cardinality columns (e.g., zip codes) are not suitable for matching.
+        Default: 20. Can be increased if needed.
     verbose : bool
         If True, print progress information (currently unused, reserved for future)
 
     Returns
     -------
     DataFrame
-        DataFrame with:
-        - 'features' column (scaled feature vector)
-        - 'treat' column (1 for treated, 0 for control)
-        - 'exact_match_id' column (for stratification)
-        - Original columns with suffixes (_index, etc.)
-        - treatment_col column
-        - id_col column
+        DataFrame with feature columns using suffix-based naming convention.
+        Downstream functions (match, match_summary, etc.) auto-discover columns
+        from these suffixes and do not require explicit column parameters.
     """
     # Set defaults for optional parameters
     if categorical_cols is None:
@@ -95,13 +173,6 @@ def generate_features(
             "At least one of categorical_cols, numeric_cols, or date_cols must be provided"
         )
 
-    # Validate that exact_match_cols requires categorical_cols
-    if exact_match_cols and not categorical_cols:
-        raise ValueError(
-            "exact_match_cols can only be used when categorical_cols is provided. "
-            "All exact match columns must be categorical."
-        )
-
     # Validate that each column is only listed once
     all_cols = categorical_cols + numeric_cols + date_cols
     for col in all_cols:
@@ -111,103 +182,110 @@ def generate_features(
                 "categorical_cols, numeric_cols, and date_cols."
             )
 
-    # Validate exact_match_cols are categorical
+    # Validate exact_match_cols are in categorical_cols or are additional columns
     for col in exact_match_cols:
-        if col not in categorical_cols:
-            raise RuntimeError(
-                f"The column {col} must be listed as a categorical column "
-                "to be used for exact matching."
-            )
+        if col not in categorical_cols and col not in all_cols:
+            # If exact match col not in categorical_cols, it must be in the DataFrame
+            if col not in df.columns:
+                raise RuntimeError(
+                    f"The exact match column '{col}' must be present in the DataFrame."
+                )
+
+    # Create ID column with __id suffix
+    id_col_internal = f"{id_col}__id"
+    df = df.withColumn(id_col_internal, F.col(id_col).cast("string"))
+
+    # Create treatment column with __treat suffix
+    df = df.withColumn(
+        "treat__treat",
+        F.when(
+            F.col(treatment_col) == F.lit(treatment_value).cast(df.schema[treatment_col].dataType),
+            1
+        ).otherwise(0)
+    )
 
     # Convert categorical columns to strings
     for c in categorical_cols:
         df = df.withColumn(c, F.col(c).cast("string"))
 
-    # Transform date columns to numeric (days from reference)
-    for c in date_cols:
-        df = df.withColumn(
-            f"{c}_days_from_2018", F.datediff(F.col(c), F.lit(date_reference))
-        )
-        numeric_cols.append(f"{c}_days_from_2018")
+    # Convert exact match columns to strings (if not already in categorical_cols)
+    for c in exact_match_cols:
+        if c not in categorical_cols:
+            df = df.withColumn(c, F.col(c).cast("string"))
 
-    # Create exact_match_id column as concatenation of exact match column values
-    # NULL values are replaced with "NULL" string
-    if len(exact_match_cols) > 0:
-        df = df.withColumn(
-            "exact_match_id",
-            F.when(df[exact_match_cols[0]].isNull(), "NULL").otherwise(
-                df[exact_match_cols[0]]
-            ),
-        )
-        # Concatenate remaining columns
-        for col in exact_match_cols[1:]:
-            df = df.withColumn(
-                "exact_match_id",
-                F.concat_ws(
-                    ":",
-                    df["exact_match_id"],
-                    F.when(df[col].isNull(), "NULL").otherwise(df[col]),
-                ),
-            )
-    else:
-        df = df.withColumn("exact_match_id", F.lit(1))
-
-    # Remove exact match columns from categorical columns
-    # (they won't be used for feature-based matching)
-    categorical_cols = list(filter(lambda x: x not in exact_match_cols, categorical_cols))
-
-    # Build preprocessing pipeline
-    preprocessing_stages = []
-
-    # Convert categorical variables to one-hot encodings
-    categorical_index_cols = []
+    # Process categorical columns (excluding exact match cols which are handled separately)
+    categorical_feature_cols = []
     for c in categorical_cols:
-        preprocessing_stages += [
-            StringIndexer(
-                inputCol=c, outputCol=f"{c}_index", handleInvalid="keep"
-            )
-        ]
-        preprocessing_stages += [
-            OneHotEncoder(inputCol=f"{c}_index", outputCol=f"{c}_onehot", dropLast=True)
-        ]
-        categorical_index_cols.append(f"{c}_index")
+        # Skip if this is an exact match column (handled separately)
+        if c in exact_match_cols:
+            continue
+        df, new_cols = _create_onehot_columns(df, c, suffix="__cat", max_categories=max_categories)
+        categorical_feature_cols.extend(new_cols)
 
-    # Create feature vector from onehot and numeric columns
-    feature_cols = [f"{c}_onehot" for c in categorical_cols] + numeric_cols
-    preprocessing_stages += [
-        VectorAssembler(inputCols=feature_cols, outputCol="unscaled_features")
-    ]
+    # Process exact match columns
+    exact_match_feature_cols = []
+    if exact_match_cols:
+        for c in exact_match_cols:
+            df, new_cols = _create_onehot_columns(df, c, suffix="__exact", max_categories=max_categories)
+            exact_match_feature_cols.extend(new_cols)
 
-    df = Pipeline(stages=preprocessing_stages).fit(df).transform(df)
+        # Create composite exact match grouping column
+        df = df.withColumn(
+            "exact_match__group",
+            F.concat_ws("_", *[F.col(c) for c in exact_match_cols])
+        )
+    else:
+        df = df.withColumn("exact_match__group", F.lit("all"))
 
-    # Scale features
-    finish_features_p = Pipeline(
-        stages=[
-            StandardScaler(inputCol="unscaled_features", outputCol="features", withStd=True)
-        ]
+    # Process numeric columns - rename with __num suffix
+    numeric_feature_cols = []
+    for c in numeric_cols:
+        new_col = f"{c}__num"
+        df = df.withColumn(new_col, F.col(c).cast("double"))
+        numeric_feature_cols.append(new_col)
+
+    # Process date columns - convert to days from reference with __date suffix
+    date_feature_cols = []
+    for c in date_cols:
+        new_col = f"{c}__date"
+        df = df.withColumn(
+            new_col,
+            F.datediff(F.col(c), F.lit(date_reference)).cast("double")
+        )
+        date_feature_cols.append(new_col)
+
+    # Assemble feature vector from all feature columns
+    assembler_cols = (
+        categorical_feature_cols +    # race_white__cat, race_black__cat, ...
+        exact_match_feature_cols +    # gender_male__exact, gender_female__exact, ...
+        numeric_feature_cols +        # age__num, bmi__num, ...
+        date_feature_cols             # diagnosis_date__date, ...
     )
 
-    df = finish_features_p.fit(df).transform(df)
+    # Create unscaled features
+    assembler = VectorAssembler(inputCols=assembler_cols, outputCol="unscaled_features")
+    df = assembler.transform(df)
 
-    # Create treat column (1 for treated, 0 for control)
-    # Cast treatment_value to match the column type
-    df = df.withColumn(
-        "treat",
-        F.when(F.col(treatment_col) == F.lit(treatment_value).cast(df.schema[treatment_col].dataType), 1).otherwise(0),
+    # Scale features (standardization happens here, not in match())
+    scaler = StandardScaler(
+        inputCol="unscaled_features",
+        outputCol="features",
+        withStd=True,
+        withMean=False
     )
+    df = Pipeline(stages=[scaler]).fit(df).transform(df)
 
-    # Select relevant columns to return
-    df = df.select(
-        categorical_cols
-        + numeric_cols
-        + date_cols
-        + exact_match_cols
-        + categorical_index_cols
-        + ["exact_match_id"]
-        + ["features"]
-        + ["treat"]
-        + [treatment_col]
-        + [id_col]
+    # Select output columns
+    output_cols = (
+        [id_col_internal] +           # person_id__id
+        ["treat__treat"] +            # treatment indicator
+        categorical_feature_cols +    # race_white__cat, ...
+        exact_match_feature_cols +    # gender_male__exact, ...
+        numeric_feature_cols +        # age__num, ...
+        date_feature_cols +           # diagnosis_date__date
+        ["exact_match__group"] +      # composite grouping
+        ["features"]                  # assembled feature vector
     )
+    df = df.select(output_cols)
 
     return df

@@ -5,7 +5,7 @@ Tests for matching functionality in BRPMatch.
 import pytest
 from pyspark.sql import functions as F
 
-from brpmatch import generate_features, match
+from brpmatch import generate_features, match, match_data
 
 
 @pytest.fixture
@@ -29,16 +29,17 @@ def features_df(spark, lalonde_df):
 
 def test_basic_matching(features_df):
     """Test basic matching with euclidean distance."""
-    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5, id_col="id", verbose=False)
+    # No id_col parameter needed - auto-discovered
+    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5, verbose=False)
 
-    # Check that required columns exist
+    # Check that required columns exist (using base name without __id suffix)
     assert "id" in matched_df.columns
     assert "match_id" in matched_df.columns
 
 
 def test_one_to_one_constraint(features_df):
     """Test that matching satisfies 1-to-1 constraint."""
-    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5, id_col="id", verbose=False)
+    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5, verbose=False)
 
     # Collect to pandas for easier checking
     pdf = matched_df.toPandas()
@@ -54,14 +55,12 @@ def test_one_to_one_constraint(features_df):
 
 def test_match_count_bounded(features_df):
     """Test that match count is bounded by min(treated, control)."""
-    # Count treated and control
-    from pyspark.sql import functions as F
+    # Count treated and control using new column name
+    treat_counts = features_df.groupBy("treat__treat").count().collect()
+    treat_count = next(row["count"] for row in treat_counts if row["treat__treat"] == 1)
+    control_count = next(row["count"] for row in treat_counts if row["treat__treat"] == 0)
 
-    treat_counts = features_df.groupBy("treat").count().collect()
-    treat_count = next(row["count"] for row in treat_counts if row["treat"] == 1)
-    control_count = next(row["count"] for row in treat_counts if row["treat"] == 0)
-
-    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5, id_col="id", verbose=False)
+    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5, verbose=False)
 
     match_count = matched_df.count()
 
@@ -71,9 +70,7 @@ def test_match_count_bounded(features_df):
 
 def test_mahalanobis_distance(features_df):
     """Test matching with Mahalanobis distance."""
-    matched_df = match(
-        features_df, feature_space="mahalanobis", n_neighbors=5, id_col="id", verbose=False
-    )
+    matched_df = match(features_df, feature_space="mahalanobis", n_neighbors=5, verbose=False)
 
     # Should produce valid matches
     assert matched_df.count() > 0
@@ -85,9 +82,7 @@ def test_mahalanobis_distance(features_df):
 
 def test_mahalanobis_uses_whitening(features_df):
     """Test that mahalanobis feature space produces valid matches using whitening."""
-    matched_df = match(
-        features_df, feature_space="mahalanobis", n_neighbors=5, id_col="id", verbose=False
-    )
+    matched_df = match(features_df, feature_space="mahalanobis", n_neighbors=5, verbose=False)
 
     # Should produce valid matches
     assert matched_df.count() > 0
@@ -112,7 +107,7 @@ def test_mahalanobis_uses_whitening(features_df):
 
 def test_new_output_columns_exist(features_df):
     """Test that new output columns are present in matched output."""
-    matched_df = match(features_df, n_neighbors=5, id_col="id", verbose=False)
+    matched_df = match(features_df, n_neighbors=5, verbose=False)
 
     expected_cols = [
         "id", "match_id", "match_round", "treated_k",
@@ -125,7 +120,7 @@ def test_new_output_columns_exist(features_df):
 
 def test_ratio_k_default_backward_compatible(features_df):
     """Test that default ratio_k=1 produces 1-to-1 matching (backward compatible)."""
-    matched_df = match(features_df, n_neighbors=5, id_col="id", verbose=False)
+    matched_df = match(features_df, n_neighbors=5, verbose=False)
     pdf = matched_df.toPandas()
 
     # Each treated should have exactly 1 match
@@ -145,7 +140,7 @@ def test_ratio_k_multiple_without_replacement(features_df):
     """Test 1-to-k matching without replacement."""
     ratio_k = 3
     matched_df = match(
-        features_df, n_neighbors=10, id_col="id", ratio_k=ratio_k,
+        features_df, n_neighbors=10, ratio_k=ratio_k,
         with_replacement=False, verbose=False
     )
     pdf = matched_df.toPandas()
@@ -166,7 +161,7 @@ def test_ratio_k_with_replacement(features_df):
     """Test 1-to-k matching with replacement."""
     ratio_k = 3
     matched_df = match(
-        features_df, n_neighbors=10, id_col="id", ratio_k=ratio_k,
+        features_df, n_neighbors=10, ratio_k=ratio_k,
         with_replacement=True, verbose=False
     )
     pdf = matched_df.toPandas()
@@ -185,7 +180,7 @@ def test_reuse_max_constraint(features_df):
     ratio_k = 3
     reuse_max = 2
     matched_df = match(
-        features_df, n_neighbors=10, id_col="id", ratio_k=ratio_k,
+        features_df, n_neighbors=10, ratio_k=ratio_k,
         with_replacement=True, reuse_max=reuse_max, verbose=False
     )
     pdf = matched_df.toPandas()
@@ -200,7 +195,7 @@ def test_require_k_false_allows_partial_matches(features_df):
     # Use a high ratio_k that might not be achievable for all treated
     ratio_k = 5
     matched_df = match(
-        features_df, n_neighbors=10, id_col="id", ratio_k=ratio_k,
+        features_df, n_neighbors=10, ratio_k=ratio_k,
         with_replacement=False, require_k=False, verbose=False
     )
     pdf = matched_df.toPandas()
@@ -214,7 +209,7 @@ def test_round_robin_fairness(features_df):
     """Test that round-robin ensures all treated get round 1 before round 2."""
     ratio_k = 3
     matched_df = match(
-        features_df, n_neighbors=10, id_col="id", ratio_k=ratio_k,
+        features_df, n_neighbors=10, ratio_k=ratio_k,
         with_replacement=False, verbose=False
     )
     pdf = matched_df.toPandas()
@@ -232,7 +227,7 @@ def test_pair_weight_computation(features_df):
     """Test that pair_weight = 1 / (treated_k * control_usage_count)."""
     ratio_k = 2
     matched_df = match(
-        features_df, n_neighbors=10, id_col="id", ratio_k=ratio_k,
+        features_df, n_neighbors=10, ratio_k=ratio_k,
         with_replacement=True, verbose=False
     )
     pdf = matched_df.toPandas()
@@ -246,14 +241,14 @@ def test_pair_weight_computation(features_df):
 def test_ratio_k_validation(features_df):
     """Test that invalid ratio_k raises ValueError."""
     with pytest.raises(ValueError, match="ratio_k must be >= 1"):
-        match(features_df, n_neighbors=5, id_col="id", ratio_k=0, verbose=False)
+        match(features_df, n_neighbors=5, ratio_k=0, verbose=False)
 
 
 def test_reuse_max_validation(features_df):
     """Test that invalid reuse_max raises ValueError."""
     with pytest.raises(ValueError, match="reuse_max must be >= 1"):
         match(
-            features_df, n_neighbors=5, id_col="id",
+            features_df, n_neighbors=5,
             with_replacement=True, reuse_max=0, verbose=False
         )
 
@@ -264,7 +259,7 @@ def test_reuse_max_warning_without_replacement(features_df):
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         match(
-            features_df, n_neighbors=5, id_col="id",
+            features_df, n_neighbors=5,
             with_replacement=False, reuse_max=5, verbose=False
         )
         # Check that a warning was issued
@@ -276,9 +271,7 @@ def test_n_neighbors_warning(features_df):
     import warnings
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        match(
-            features_df, n_neighbors=2, id_col="id", ratio_k=5, verbose=False
-        )
+        match(features_df, n_neighbors=2, ratio_k=5, verbose=False)
         assert any("n_neighbors" in str(warning.message) and "ratio_k" in str(warning.message)
                    for warning in w)
 
@@ -287,7 +280,7 @@ def test_match_round_ordering(features_df):
     """Test that match_round indicates preference order (1=best, 2=second best)."""
     ratio_k = 2
     matched_df = match(
-        features_df, n_neighbors=10, id_col="id", ratio_k=ratio_k,
+        features_df, n_neighbors=10, ratio_k=ratio_k,
         with_replacement=False, verbose=False
     )
     pdf = matched_df.toPandas()
@@ -302,10 +295,111 @@ def test_match_round_ordering(features_df):
 def test_control_usage_count_without_replacement(features_df):
     """Test that control_usage_count is always 1 without replacement."""
     matched_df = match(
-        features_df, n_neighbors=10, id_col="id", ratio_k=2,
+        features_df, n_neighbors=10, ratio_k=2,
         with_replacement=False, verbose=False
     )
     pdf = matched_df.toPandas()
 
     assert all(pdf["control_usage_count"] == 1), \
         "Without replacement, control_usage_count should always be 1"
+
+
+# =============================================================================
+# Tests for match_data() Function
+# =============================================================================
+
+
+def test_match_data_basic(spark, lalonde_df, features_df):
+    """Test basic match_data functionality."""
+    # Add id if not present
+    if "id" not in lalonde_df.columns:
+        lalonde_df = lalonde_df.withColumn("id", F.monotonically_increasing_id().cast("string"))
+
+    # Perform matching
+    matched_df = match(features_df, n_neighbors=5, verbose=False)
+
+    # Create matched data
+    result_df = match_data(lalonde_df, matched_df, id_col="id")
+
+    # Check that required columns exist
+    assert "weights" in result_df.columns
+    assert "subclass" in result_df.columns
+    assert "matched" in result_df.columns
+
+    # Check that all rows are present
+    assert result_df.count() == lalonde_df.count()
+
+
+def test_match_data_weights_1to1(spark, lalonde_df, features_df):
+    """Test that 1:1 matching produces weight=1 for all matched rows."""
+    if "id" not in lalonde_df.columns:
+        lalonde_df = lalonde_df.withColumn("id", F.monotonically_increasing_id().cast("string"))
+
+    matched_df = match(features_df, n_neighbors=5, ratio_k=1, verbose=False)
+    result_df = match_data(lalonde_df, matched_df, id_col="id")
+
+    # All matched rows should have weight=1
+    matched_rows = result_df.filter(F.col("matched") == True).select("weights").collect()
+    assert all(row["weights"] == 1.0 for row in matched_rows), "1:1 matching should produce weight=1"
+
+
+def test_match_data_weights_1to3_no_replacement(spark, lalonde_df, features_df):
+    """Test that 1:3 matching without replacement produces weight=1/3 for controls."""
+    if "id" not in lalonde_df.columns:
+        lalonde_df = lalonde_df.withColumn("id", F.monotonically_increasing_id().cast("string"))
+
+    matched_df = match(features_df, n_neighbors=10, ratio_k=3, with_replacement=False, verbose=False)
+    result_df = match_data(lalonde_df, matched_df, id_col="id")
+
+    # Join with treatment info to separate treated/control
+    result_with_treat = result_df.join(
+        features_df.select("id__id", "treat__treat"),
+        result_df["id"] == features_df["id__id"],
+        "left"
+    ).drop("id__id")
+
+    # Treated should have weight=1
+    treated_matched = result_with_treat.filter(
+        (F.col("matched") == True) & (F.col("treat__treat") == 1)
+    ).select("weights").collect()
+    assert all(row["weights"] == 1.0 for row in treated_matched), "Treated should have weight=1"
+
+    # Controls should have weight=1/3
+    control_matched = result_with_treat.filter(
+        (F.col("matched") == True) & (F.col("treat__treat") == 0)
+    ).select("weights").collect()
+    expected_weight = 1.0 / 3
+    assert all(abs(row["weights"] - expected_weight) < 1e-10 for row in control_matched), \
+        "Controls in 1:3 matching should have weight=1/3"
+
+
+def test_match_data_unmatched_have_zero_weight(spark, lalonde_df, features_df):
+    """Test that unmatched rows have weight=0."""
+    if "id" not in lalonde_df.columns:
+        lalonde_df = lalonde_df.withColumn("id", F.monotonically_increasing_id().cast("string"))
+
+    matched_df = match(features_df, n_neighbors=5, verbose=False)
+    result_df = match_data(lalonde_df, matched_df, id_col="id")
+
+    # Unmatched rows should have weight=0
+    unmatched_rows = result_df.filter(F.col("matched") == False).select("weights").collect()
+    assert all(row["weights"] == 0.0 for row in unmatched_rows), "Unmatched rows should have weight=0"
+
+
+def test_match_data_subclass_assignment(spark, lalonde_df, features_df):
+    """Test that subclass correctly identifies matched sets."""
+    if "id" not in lalonde_df.columns:
+        lalonde_df = lalonde_df.withColumn("id", F.monotonically_increasing_id().cast("string"))
+
+    matched_df = match(features_df, n_neighbors=5, verbose=False)
+    result_df = match_data(lalonde_df, matched_df, id_col="id")
+
+    # Matched rows should have non-null subclass
+    matched_rows = result_df.filter(F.col("matched") == True)
+    assert matched_rows.filter(F.col("subclass").isNull()).count() == 0, \
+        "Matched rows should have subclass assigned"
+
+    # Unmatched rows should have null subclass
+    unmatched_rows = result_df.filter(F.col("matched") == False)
+    assert unmatched_rows.filter(F.col("subclass").isNotNull()).count() == 0, \
+        "Unmatched rows should have null subclass"

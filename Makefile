@@ -1,4 +1,4 @@
-.PHONY: help install dev clean build check test test-quick example zip publish
+.PHONY: help install dev clean clean-examples build check test test-quick example example-1to1-euclidean example-1to1-mahalanobis example-1to3-no-replacement-euclidean example-1to3-no-replacement-mahalanobis example-1to3-with-replacement-euclidean example-1to3-with-replacement-mahalanobis zip publish
 
 default: help
 
@@ -17,8 +17,15 @@ help:
 	@echo "  make dev          - Install dev dependencies (including build tools)"
 	@echo "  make test         - Run pytest with local Spark"
 	@echo "  make test-quick   - Run pytest in fast-fail mode"
-	@echo "  make example      - Run example pipeline with lalonde dataset"
-	@echo "  make clean        - Remove build artifacts"
+	@echo "  make example      - Run all 6 example pipelines"
+	@echo "  make example-1to1-euclidean               - Run 1:1 Euclidean example only"
+	@echo "  make example-1to1-mahalanobis             - Run 1:1 Mahalanobis example only"
+	@echo "  make example-1to3-no-replacement-euclidean    - Run 1:3 no repl Euclidean example only"
+	@echo "  make example-1to3-no-replacement-mahalanobis  - Run 1:3 no repl Mahalanobis example only"
+	@echo "  make example-1to3-with-replacement-euclidean  - Run 1:3 with repl Euclidean example only"
+	@echo "  make example-1to3-with-replacement-mahalanobis - Run 1:3 with repl Mahalanobis example only"
+	@echo "  make clean        - Remove build artifacts and example outputs"
+	@echo "  make clean-examples - Remove example outputs only"
 	@echo "  make build        - Build sdist and wheel"
 	@echo "  make zip          - Create importable .zip for offline use"
 	@echo "  make check        - Check build with twine"
@@ -36,8 +43,19 @@ dev:
 	poetry install
 	poetry run pip install build twine
 
-clean:
+clean: clean-examples
 	rm -rf dist/ build/ *.egg-info
+
+clean-examples:
+	@echo "Cleaning example outputs..."
+	rm -f example/1to1_euclidean/*.png example/1to1_euclidean/*.csv
+	rm -f example/1to1_mahalanobis/*.png example/1to1_mahalanobis/*.csv
+	rm -f example/1to3_no_replacement_euclidean/*.png example/1to3_no_replacement_euclidean/*.csv
+	rm -f example/1to3_no_replacement_mahalanobis/*.png example/1to3_no_replacement_mahalanobis/*.csv
+	rm -f example/1to3_with_replacement_euclidean/*.png example/1to3_with_replacement_euclidean/*.csv
+	rm -f example/1to3_with_replacement_mahalanobis/*.png example/1to3_with_replacement_mahalanobis/*.csv
+	rm -f example/*.png example/*.csv
+	@echo "Example outputs cleaned"
 
 test:
 	JAVA_HOME=$(JAVA_HOME) poetry run pytest tests/ -v
@@ -46,7 +64,37 @@ test-quick:
 	JAVA_HOME=$(JAVA_HOME) poetry run pytest tests/ -v -x --tb=short
 
 example:
-	JAVA_HOME=$(JAVA_HOME) poetry run python example/example.py
+	@echo "Running all BRPMatch examples..."
+	@echo ""
+	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to1_euclidean/example.py
+	@echo ""
+	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to1_mahalanobis/example.py
+	@echo ""
+	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to3_no_replacement_euclidean/example.py
+	@echo ""
+	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to3_no_replacement_mahalanobis/example.py
+	@echo ""
+	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to3_with_replacement_euclidean/example.py
+	@echo ""
+	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to3_with_replacement_mahalanobis/example.py
+
+example-1to1-euclidean:
+	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to1_euclidean/example.py
+
+example-1to1-mahalanobis:
+	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to1_mahalanobis/example.py
+
+example-1to3-no-replacement-euclidean:
+	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to3_no_replacement_euclidean/example.py
+
+example-1to3-no-replacement-mahalanobis:
+	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to3_no_replacement_mahalanobis/example.py
+
+example-1to3-with-replacement-euclidean:
+	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to3_with_replacement_euclidean/example.py
+
+example-1to3-with-replacement-mahalanobis:
+	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to3_with_replacement_mahalanobis/example.py
 
 zip: clean build
 	mkdir -p dist

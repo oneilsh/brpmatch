@@ -30,17 +30,17 @@ def stratified_df(spark, lalonde_df):
         verbose=False,
     )
 
-    # Match
-    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5, id_col="id", verbose=False)
+    # Match (no id_col parameter - auto-discovered)
+    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5, verbose=False)
 
-    # Stratify
-    return stratify_for_plot(features_df, matched_df, id_col="id", match_id_col="match_id")
+    # Stratify (no column parameters - auto-discovered)
+    return stratify_for_plot(features_df, matched_df)
 
 
 def test_love_plot_returns_figure(stratified_df):
     """Test that love_plot returns a matplotlib figure."""
-    feature_cols = ["race_index", "married_index", "nodegree_index", "age", "educ", "re74", "re75"]
-    fig = love_plot(stratified_df, feature_cols, sample_frac=1.0)
+    # No feature_cols parameter - auto-discovered from suffixes
+    fig = love_plot(stratified_df, sample_frac=1.0)
 
     assert isinstance(fig, matplotlib.figure.Figure)
 
@@ -49,10 +49,19 @@ def test_balance_statistics_computation(stratified_df):
     """Test that balance statistics are computed correctly."""
     # Just ensure the plot can be generated
     # (balance stats are computed internally)
-    feature_cols = ["race_index", "married_index", "nodegree_index", "age", "educ", "re74", "re75"]
-    fig = love_plot(stratified_df, feature_cols, sample_frac=1.0)
+    fig = love_plot(stratified_df, sample_frac=1.0)
 
     # Figure should have 2 subplots (SMD and VR)
+    assert len(fig.axes) == 2
+
+
+def test_love_plot_auto_discovers_features(stratified_df):
+    """Test that love_plot auto-discovers feature columns from suffixes."""
+    fig = love_plot(stratified_df, sample_frac=1.0)
+
+    # Should successfully generate plot with auto-discovered features
+    assert isinstance(fig, matplotlib.figure.Figure)
+    # Should have 2 axes (SMD and VR)
     assert len(fig.axes) == 2
 
 

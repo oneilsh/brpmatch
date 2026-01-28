@@ -13,10 +13,21 @@ import pandas as pd
 from pyspark.sql import DataFrame
 
 
+def _strip_suffix(col_name: str) -> str:
+    """Strip the __cat, __num, __date, __exact suffix for display."""
+    for suffix in ("__cat", "__num", "__date", "__exact"):
+        if col_name.endswith(suffix):
+            return col_name[:-len(suffix)]
+    return col_name
+
+
+def _is_exact_match_column(col_name: str) -> bool:
+    """Check if column is an exact match column."""
+    return col_name.endswith("__exact")
+
+
 def love_plot(
     stratified_df: DataFrame,
-    feature_cols: List[str],
-    treatment_col: str = "treat",
     strata_col: str = "strata",
     sample_frac: float = 0.05,
     figsize: Tuple[int, int] = (10, 12),
@@ -28,10 +39,6 @@ def love_plot(
     ----------
     stratified_df : DataFrame
         Output from stratify_for_plot()
-    feature_cols : List[str]
-        Columns to include in the plot (both categorical and numeric features)
-    treatment_col : str
-        Column indicating treatment (1) vs control (0)
     strata_col : str
         Column identifying matched pairs
     sample_frac : float
@@ -45,7 +52,18 @@ def love_plot(
         Love plot figure with two panels:
         - Left: Absolute Standardized Mean Difference
         - Right: Variance Ratio
+
+    Notes
+    -----
+    Column names are auto-discovered from stratified_df:
+    - Feature columns: end with __cat, __num, __date, or __exact suffixes
+    - Treatment column: standardized as treat__treat
+    - Display names strip suffixes and mark exact match columns with "(exact)"
     """
+    # Auto-discover feature columns
+    suffixes = ("__cat", "__num", "__date", "__exact")
+    feature_cols = [c for c in stratified_df.columns if any(c.endswith(s) for s in suffixes)]
+    treatment_col = "treat__treat"
 
     # Sample data if needed
     if sample_frac < 1.0:
@@ -62,9 +80,14 @@ def love_plot(
         balance_df["smd_adjusted"]
     )
 
+    # Create display names
+    balance_df["display_name"] = balance_df["covariate"].apply(
+        lambda col: f"{_strip_suffix(col)} (exact)" if _is_exact_match_column(col) else _strip_suffix(col)
+    )
+
     # Reshape for plotting
     plot_df = balance_df.melt(
-        id_vars=["covariate", "improvement"],
+        id_vars=["covariate", "display_name", "improvement"],
         value_vars=["smd_unadjusted", "smd_adjusted", "vr_unadjusted", "vr_adjusted"],
         var_name="eval_variable",
         value_name="eval_value",
@@ -88,8 +111,8 @@ def love_plot(
 
     # Sort by improvement
     plot_df = plot_df.sort_values("improvement")
-    covariate_order = (
-        balance_df.sort_values("improvement")["covariate"].unique().tolist()
+    display_name_order = (
+        balance_df.sort_values("improvement")["display_name"].unique().tolist()
     )
 
     # Create figure
@@ -99,13 +122,30 @@ def love_plot(
     smd_data = plot_df[plot_df["test"] == "Absolute Standardized Mean Difference"]
     for sample_type in ["Unadjusted", "Adjusted"]:
         subset = smd_data[smd_data["set"] == sample_type]
-        axes[0].scatter(
-            subset["eval_value"],
-            subset["covariate"],
-            label=sample_type,
-            alpha=0.7,
-            s=50,
-        )
+        # Check if exact match for marker style
+        is_exact = subset["covariate"].apply(_is_exact_match_column)
+        # Plot exact match with square markers
+        if is_exact.any():
+            exact_subset = subset[is_exact]
+            axes[0].scatter(
+                exact_subset["eval_value"],
+                exact_subset["display_name"],
+                label=sample_type if not subset[~is_exact].empty else sample_type,
+                alpha=0.7,
+                s=50,
+                marker='s',
+            )
+        # Plot non-exact with circle markers
+        if (~is_exact).any():
+            non_exact_subset = subset[~is_exact]
+            axes[0].scatter(
+                non_exact_subset["eval_value"],
+                non_exact_subset["display_name"],
+                label=sample_type if is_exact.any() else sample_type,
+                alpha=0.7,
+                s=50,
+                marker='o',
+            )
     axes[0].set_xlabel("Absolute Standardized Mean Difference")
     axes[0].set_ylabel("Variable")
     axes[0].legend(title="Sample")
@@ -115,20 +155,37 @@ def love_plot(
     vr_data = plot_df[plot_df["test"] == "Variance Ratio"]
     for sample_type in ["Unadjusted", "Adjusted"]:
         subset = vr_data[vr_data["set"] == sample_type]
-        axes[1].scatter(
-            subset["eval_value"],
-            subset["covariate"],
-            label=sample_type,
-            alpha=0.7,
-            s=50,
-        )
+        # Check if exact match for marker style
+        is_exact = subset["covariate"].apply(_is_exact_match_column)
+        # Plot exact match with square markers
+        if is_exact.any():
+            exact_subset = subset[is_exact]
+            axes[1].scatter(
+                exact_subset["eval_value"],
+                exact_subset["display_name"],
+                label=sample_type if not subset[~is_exact].empty else sample_type,
+                alpha=0.7,
+                s=50,
+                marker='s',
+            )
+        # Plot non-exact with circle markers
+        if (~is_exact).any():
+            non_exact_subset = subset[~is_exact]
+            axes[1].scatter(
+                non_exact_subset["eval_value"],
+                non_exact_subset["display_name"],
+                label=sample_type if is_exact.any() else sample_type,
+                alpha=0.7,
+                s=50,
+                marker='o',
+            )
     axes[1].set_xlabel("Variance Ratio")
     axes[1].legend(title="Sample")
     axes[1].grid(True, alpha=0.3)
 
-    # Set y-axis to show covariates in order
-    axes[0].set_yticks(range(len(covariate_order)))
-    axes[0].set_yticklabels(covariate_order, fontsize=7)
+    # Set y-axis to show display names in order
+    axes[0].set_yticks(range(len(display_name_order)))
+    axes[0].set_yticklabels(display_name_order, fontsize=7)
 
     plt.tight_layout()
 

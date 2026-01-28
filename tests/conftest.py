@@ -35,7 +35,7 @@ def spark():
 @pytest.fixture(scope="session")
 def lalonde_df(spark):
     """Load the lalonde test dataset."""
-    data_path = os.path.join(os.path.dirname(__file__), "data", "lalonde.csv")
+    data_path = os.path.join(os.path.dirname(__file__), "..", "data", "lalonde.csv")
 
     # Check if file exists, if not skip tests that need it
     if not os.path.exists(data_path):
