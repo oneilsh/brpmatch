@@ -102,6 +102,40 @@ def load_lalonde(spark: SparkSession):
 
 def setup_pandas_display():
     """Configure pandas display options for cleaner output in examples."""
-    pd.set_option('display.max_columns', 8)
-    pd.set_option('display.width', 100)
-    pd.set_option('display.max_colwidth', 20)
+    pd.set_option('display.max_columns', None)  # Show all columns
+    pd.set_option('display.width', 120)  # Wider terminal
+    pd.set_option('display.max_colwidth', 20)  # Truncate long values
+
+
+def print_matching_stats(features_df, matched, treatment_col="treat__treat", id_col="id__id"):
+    """
+    Print statistics about matched vs unmatched patients.
+
+    Parameters
+    ----------
+    features_df : DataFrame
+        Features dataframe with treatment column
+    matched : DataFrame
+        Matched pairs dataframe with id and match_id columns
+    treatment_col : str
+        Name of treatment column in features_df
+    id_col : str
+        Name of ID column in features_df
+    """
+    from pyspark.sql import functions as F
+
+    # Get treated and control counts from features
+    treated_df = features_df.filter(F.col(treatment_col) == "1")
+    control_df = features_df.filter(F.col(treatment_col) == "0")
+
+    n_treated_total = treated_df.count()
+    n_control_total = control_df.count()
+
+    # Get matched counts
+    n_treated_matched = matched.select("id").distinct().count()
+    n_control_matched = matched.select("match_id").distinct().count()
+
+    # Print statistics
+    print(f"  Treated: {highlight(str(n_treated_matched))}/{value(str(n_treated_total))} matched")
+    print(f"  Control: {highlight(str(n_control_matched))}/{value(str(n_control_total))} matched")
+    print(f"  Total matched pairs: {highlight(str(matched.count()))}")
