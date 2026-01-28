@@ -253,27 +253,22 @@ def test_reuse_max_validation(features_df):
         )
 
 
-def test_reuse_max_warning_without_replacement(features_df):
+def test_reuse_max_warning_without_replacement(features_df, capsys):
     """Test that reuse_max with with_replacement=False issues warning."""
-    import warnings
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        match(
-            features_df, n_neighbors=5,
-            with_replacement=False, reuse_max=5, verbose=False
-        )
-        # Check that a warning was issued
-        assert any("reuse_max is ignored" in str(warning.message) for warning in w)
+    match(
+        features_df, n_neighbors=5,
+        with_replacement=False, reuse_max=5, verbose=False
+    )
+    # Check that a warning was printed
+    captured = capsys.readouterr()
+    assert "reuse_max is ignored" in captured.out
 
 
-def test_n_neighbors_warning(features_df):
+def test_n_neighbors_warning(features_df, capsys):
     """Test that n_neighbors < ratio_k issues warning."""
-    import warnings
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        match(features_df, n_neighbors=2, ratio_k=5, verbose=False)
-        assert any("n_neighbors" in str(warning.message) and "ratio_k" in str(warning.message)
-                   for warning in w)
+    match(features_df, n_neighbors=2, ratio_k=5, verbose=False)
+    captured = capsys.readouterr()
+    assert "n_neighbors" in captured.out and "ratio_k" in captured.out
 
 
 def test_match_round_ordering(features_df):

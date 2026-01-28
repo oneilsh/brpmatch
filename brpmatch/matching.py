@@ -18,7 +18,6 @@ from pyspark.mllib.linalg import Vectors, VectorUDT
 from pyspark.mllib.linalg.distributed import RowMatrix
 from pyspark.sql import DataFrame
 
-from .warnings_util import warn
 from pyspark.sql.types import (
     DoubleType,
     IntegerType,
@@ -180,11 +179,11 @@ def match(
         if reuse_max < 1:
             raise ValueError(f"reuse_max must be >= 1, got {reuse_max}")
         if not with_replacement:
-            warn("reuse_max is ignored when with_replacement=False")
+            print("Warning: reuse_max is ignored when with_replacement=False")
 
     if n_neighbors < ratio_k:
-        warn(
-            f"n_neighbors ({n_neighbors}) < ratio_k ({ratio_k}). "
+        print(
+            f"Warning: n_neighbors ({n_neighbors}) < ratio_k ({ratio_k}). "
             f"Consider increasing n_neighbors to ensure enough candidates."
         )
 
@@ -756,8 +755,8 @@ def _print_match_summary(
 
     # Warn if match rate is low
     if match_rate < warn_threshold:
-        warn(
-            f"Low match rate: only {match_rate*100:.1f}% of treated units were matched. "
+        print(
+            f"Warning: Low match rate: only {match_rate*100:.1f}% of treated units were matched. "
             f"Consider adjusting bucket_length or num_hash_tables parameters."
         )
 

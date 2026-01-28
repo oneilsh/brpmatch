@@ -15,7 +15,6 @@ import pyspark.sql.functions as F
 
 from .stratify import stratify_for_plot
 from .loveplot import love_plot, _compute_smd, _compute_variance_ratio
-from .warnings_util import warn
 
 
 def _discover_feature_columns(df: DataFrame) -> List[str]:
@@ -147,9 +146,6 @@ def match_summary(
     if verbose:
         _print_balance_table(balance_df, sample_frac)
         _print_sample_sizes(pdf, treatment_col, strata_col="strata")
-
-    # Check thresholds and warn
-    _check_balance_thresholds(balance_df, threshold_smd, threshold_vr)
 
     if plot:
         # Generate love plot using existing infrastructure
@@ -320,33 +316,6 @@ def _print_sample_sizes(pdf: pd.DataFrame, treatment_col: str, strata_col: str) 
     print("\nSample sizes:")
     print(f"  Treated: {len(treated)} (matched: {len(treated_matched)}, unmatched: {len(treated) - len(treated_matched)})")
     print(f"  Control: {len(control)} (matched: {len(control_matched)}, unmatched: {len(control) - len(control_matched)})")
-
-
-def _check_balance_thresholds(
-    balance_df: pd.DataFrame,
-    threshold_smd: float,
-    threshold_vr: Tuple[float, float]
-) -> None:
-    """Check balance thresholds and emit warnings."""
-    # Check SMD threshold
-    poor_smd = balance_df[balance_df["smd_adjusted"].abs() > threshold_smd]
-    if len(poor_smd) > 0:
-        warn(
-            f"Poor balance detected: {len(poor_smd)} covariate(s) have |SMD| > {threshold_smd} "
-            f"after matching: {', '.join(poor_smd['covariate'].tolist())}"
-        )
-
-    # Check VR threshold (only for non-binary)
-    vr_min, vr_max = threshold_vr
-    continuous = balance_df[~balance_df["is_binary"]]
-    poor_vr = continuous[
-        (continuous["vr_adjusted"] < vr_min) | (continuous["vr_adjusted"] > vr_max)
-    ]
-    if len(poor_vr) > 0:
-        warn(
-            f"Variance ratio outside [{vr_min}, {vr_max}] for {len(poor_vr)} covariate(s) "
-            f"after matching: {', '.join(poor_vr['covariate'].tolist())}"
-        )
 
 
 def match_data(

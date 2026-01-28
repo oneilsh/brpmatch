@@ -26,6 +26,11 @@ def _is_exact_match_column(col_name: str) -> bool:
     return col_name.endswith("__exact")
 
 
+def _is_categorical_column(col_name: str) -> bool:
+    """Check if column is a categorical column."""
+    return col_name.endswith("__cat")
+
+
 def love_plot(
     stratified_df: DataFrame,
     strata_col: str = "strata",
@@ -150,9 +155,16 @@ def love_plot(
     axes[0].set_ylabel("Variable")
     axes[0].legend(title="Sample")
     axes[0].grid(True, alpha=0.3)
+    # Add reference line at SMD = 0.1
+    axes[0].axvline(x=0.1, color='red', linestyle='--', linewidth=1, alpha=0.7)
+    # Add annotation for the threshold
+    axes[0].text(0.105, 0, "0.1 threshold", color='red', fontsize=10,
+                 verticalalignment='bottom', horizontalalignment='left')
 
-    # Plot Variance Ratio
-    vr_data = plot_df[plot_df["test"] == "Variance Ratio"]
+    # Plot Variance Ratio (excluding categorical variables with NaN values)
+    vr_data = plot_df[
+        (plot_df["test"] == "Variance Ratio") & (plot_df["eval_value"].notna())
+    ]
     for sample_type in ["Unadjusted", "Adjusted"]:
         subset = vr_data[vr_data["set"] == sample_type]
         # Check if exact match for marker style
@@ -182,6 +194,11 @@ def love_plot(
     axes[1].set_xlabel("Variance Ratio")
     axes[1].legend(title="Sample")
     axes[1].grid(True, alpha=0.3)
+    # Add reference line at VR = 1.0
+    axes[1].axvline(x=1.0, color='red', linestyle='--', linewidth=1, alpha=0.7)
+    # Add annotation for equal variance
+    axes[1].text(1.02, 0, "equal variance", color='red', fontsize=10,
+                 verticalalignment='bottom', horizontalalignment='left')
 
     # Set y-axis to show display names in order
     axes[0].set_yticks(range(len(display_name_order)))
@@ -216,13 +233,19 @@ def _compute_balance_stats(
 
     for col in feature_cols:
         smd_un = _compute_smd(treated[col].values, control[col].values)
-        vr_un = _compute_variance_ratio(treated[col].values, control[col].values)
         smd_adj = _compute_smd(
             treated_matched[col].values, control_matched[col].values
         )
-        vr_adj = _compute_variance_ratio(
-            treated_matched[col].values, control_matched[col].values
-        )
+
+        # Skip variance ratio for categorical columns
+        if _is_categorical_column(col):
+            vr_un = np.nan
+            vr_adj = np.nan
+        else:
+            vr_un = _compute_variance_ratio(treated[col].values, control[col].values)
+            vr_adj = _compute_variance_ratio(
+                treated_matched[col].values, control_matched[col].values
+            )
 
         results.append(
             {
