@@ -48,7 +48,7 @@ def match(
     with_replacement: bool = False,
     reuse_max: Optional[int] = None,
     require_k: bool = True,
-) -> DataFrame:
+) -> Tuple[DataFrame, DataFrame, DataFrame]:
     """
     Perform LSH-based distance matching between treated and control cohorts.
 
@@ -57,7 +57,7 @@ def match(
     2. Within each bucket, use k-NN to find candidate control patients
     3. Apply matching algorithm (greedy 1-to-1 per round for without replacement,
        or independent selection for with replacement)
-    4. Return matched pairs with distances and weights
+    4. Return three DataFrames: units (analysis-ready), pairs (detailed matches), and bucket_stats (diagnostics)
 
     The algorithm uses 4 bucket levels with progressively smaller bucket lengths
     to adaptively handle varying bucket sizes.
@@ -102,16 +102,36 @@ def match(
 
     Returns
     -------
-    DataFrame
-        DataFrame with columns:
-        - {id_col_base}: treated patient ID (e.g., "person_id")
-        - match_{id_col_base}: matched control patient ID
-        - match_round: which round this match came from (1=best, 2=second best, etc.)
-        - treated_k: total matches for this treated patient
-        - control_usage_count: times this control was matched (always 1 if without replacement)
-        - pair_weight: weight for analysis = 1/(treated_k * control_usage_count)
-        - bucket_num_input_patients: size of bucket where match was found
-        - bucket_seconds: time to process bucket
+    Tuple[DataFrame, DataFrame, DataFrame]
+        A tuple of three DataFrames:
+
+        units : DataFrame
+            One row per patient (treated + control, matched + unmatched).
+            Columns:
+            - id: Patient ID (same as input {id_col})
+            - subclass: Match group identifier (treated ID for matched, None for unmatched)
+            - weight: ATT estimation weight (1.0 for treated, 1/k for controls, 0.0 for unmatched)
+            - is_treated: Boolean treatment indicator
+
+        pairs : DataFrame
+            One row per (treated, control) match pair.
+            Columns:
+            - {id_col_base}: Treated patient ID
+            - match_{id_col_base}: Matched control patient ID
+            - match_round: Which round (1=best match, 2=second best, etc.)
+            - treated_k: Number of controls matched to this treated
+            - control_usage_count: Times this control was matched
+            - pair_weight: Analysis weight = 1/(treated_k * control_usage_count)
+
+        bucket_stats : DataFrame
+            One row per LSH bucket with processing statistics.
+            Columns:
+            - bucket_id: Bucket identifier
+            - num_patients: Total patients in bucket
+            - num_treated: Treated patients in bucket
+            - num_control: Control patients in bucket
+            - num_matches: Match pairs produced from bucket
+            - seconds: Processing time for bucket
 
         Note: Column names are auto-discovered from features_df using suffix conventions:
         - ID column: ends with __id
@@ -424,7 +444,10 @@ def match(
             StructField("treated_k", IntegerType()),
             StructField("control_usage_count", IntegerType()),
             StructField("pair_weight", DoubleType()),
-            StructField("bucket_num_input_patients", IntegerType()),
+            StructField("bucket_id", StringType()),
+            StructField("bucket_num_patients", IntegerType()),
+            StructField("bucket_num_treated", IntegerType()),
+            StructField("bucket_num_control", IntegerType()),
             StructField("bucket_seconds", DoubleType()),
         ]
     )
@@ -442,6 +465,12 @@ def match(
         # Extract the individual cohorts
         needs_matching = group_df.loc[group_df[treatment_col] == 1]
         match_to = group_df.loc[group_df[treatment_col] == 0]
+
+        # Capture bucket-level counts for stats
+        num_treated_in_bucket = len(needs_matching)
+        num_control_in_bucket = len(match_to)
+        # Get bucket_id from first row (all rows in group have same bucket_id)
+        bucket_id_value = group_df["bucket_id"].iloc[0]
 
         # Return empty DataFrame if either cohort is empty
         if len(needs_matching) == 0 or len(match_to) == 0:
@@ -621,7 +650,10 @@ def match(
                 result_df["pair_weight"] = 1.0 / (result_df["treated_k"] * result_df["control_usage_count"])
 
         # Add bucket metadata
-        result_df["bucket_num_input_patients"] = bucket_size
+        result_df["bucket_id"] = bucket_id_value
+        result_df["bucket_num_patients"] = bucket_size
+        result_df["bucket_num_treated"] = num_treated_in_bucket
+        result_df["bucket_num_control"] = num_control_in_bucket
 
         bucket_end_time = time.perf_counter()
         result_df["bucket_seconds"] = bucket_end_time - bucket_start_time
@@ -634,7 +666,10 @@ def match(
             "treated_k",
             "control_usage_count",
             "pair_weight",
-            "bucket_num_input_patients",
+            "bucket_id",
+            "bucket_num_patients",
+            "bucket_num_treated",
+            "bucket_num_control",
             "bucket_seconds",
         ]
 
@@ -677,7 +712,111 @@ def match(
             n_unique_controls_used=n_unique_controls_used,
         )
 
-    return matches
+    # Build bucket_stats by aggregating from matches (one row per bucket)
+    bucket_stats = matches.groupBy("bucket_id").agg(
+        F.first("bucket_num_patients").alias("num_patients"),
+        F.first("bucket_num_treated").alias("num_treated"),
+        F.first("bucket_num_control").alias("num_control"),
+        F.count("*").alias("num_matches"),
+        F.first("bucket_seconds").alias("seconds"),
+    ).select(
+        "bucket_id",
+        "num_patients",
+        "num_treated",
+        "num_control",
+        "num_matches",
+        "seconds"
+    )
+
+    # Build pairs DataFrame (drop bucket columns - they're in bucket_stats)
+    pairs = matches.drop(
+        "bucket_id", "bucket_num_patients", "bucket_num_treated",
+        "bucket_num_control", "bucket_seconds"
+    )
+
+    # Build units DataFrame
+    units = _build_units_df(features_df, matches, id_col, id_col_base, treatment_col)
+
+    return units, pairs, bucket_stats
+
+
+def _build_units_df(
+    features_df: DataFrame,
+    matches: DataFrame,
+    id_col: str,
+    id_col_base: str,
+    treatment_col: str,
+) -> DataFrame:
+    """
+    Build the units DataFrame with one row per patient.
+
+    Parameters
+    ----------
+    features_df : DataFrame
+        Input features DataFrame
+    matches : DataFrame
+        Match pairs DataFrame
+    id_col : str
+        Full ID column name (e.g., "person_id__id")
+    id_col_base : str
+        Base ID column name (e.g., "person_id")
+    treatment_col : str
+        Treatment column name (e.g., "treat__treat")
+
+    Returns
+    -------
+    DataFrame
+        Units DataFrame with columns: id, subclass, weight, is_treated
+    """
+    match_id_col = f"match_{id_col_base}"
+
+    # Extract unique patients from features_df
+    all_patients = features_df.select(
+        F.col(id_col).alias("id"),
+        F.col(treatment_col).cast("boolean").alias("is_treated")
+    )
+
+    # Compute treated weights (always 1.0 for matched treated)
+    # Subclass = treated ID
+    treated_weights = matches.select(
+        F.col(id_col_base).alias("id"),
+        F.col(id_col_base).alias("subclass"),
+        F.lit(1.0).alias("weight"),
+    ).distinct()
+
+    # Compute control weights
+    # Weight = sum of (1/treated_k) for each match the control appears in
+    # Subclass = first treated ID they're matched to (arbitrary but consistent)
+    control_weights = matches.withColumn(
+        "_weight_contribution", 1.0 / F.col("treated_k")
+    ).groupBy(match_id_col).agg(
+        F.sum("_weight_contribution").alias("weight"),
+        F.first(id_col_base).alias("subclass"),  # Use first treated as subclass
+    ).select(
+        F.col(match_id_col).alias("id"),
+        F.col("subclass"),
+        F.col("weight"),
+    )
+
+    # Combine treated and control weights
+    matched_weights = treated_weights.unionByName(control_weights)
+
+    # Join to all patients
+    units = all_patients.join(
+        matched_weights,
+        on="id",
+        how="left"
+    )
+
+    # Fill unmatched with defaults
+    units = units.withColumn(
+        "weight", F.coalesce(F.col("weight"), F.lit(0.0))
+    ).withColumn(
+        "subclass", F.coalesce(F.col("subclass"), F.lit(None))
+    )
+
+    # Sort by subclass descending (matched units first, unmatched at end with null subclass)
+    return units.select("id", "subclass", "weight", "is_treated").orderBy(F.desc("subclass"))
 
 
 def _print_match_summary(

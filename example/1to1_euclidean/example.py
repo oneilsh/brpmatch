@@ -8,10 +8,12 @@ Each treated patient is matched to exactly one control patient.
 import os
 import sys
 
+from pyspark.sql import functions as F
+
 # Add parent directory to path for utils import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from brpmatch import generate_features, match, match_summary, stratify_for_plot
+from brpmatch import generate_features, match, match_summary
 from utils import create_spark_session, load_lalonde, setup_pandas_display, print_matching_stats
 from utils import section_header, subsection_header, highlight, value
 
@@ -75,11 +77,13 @@ def main():
     # For Euclidean distance, uses standardized features directly.
     # For Mahalanobis distance, applies whitening transform to features first.
     #
-    # Output columns: id (treated), match_id (control), pair_weight, match_round, and more
-    # The matched DataFrame is the PRIMARY OUTPUT - use it to link outcomes to matched pairs
+    # Output: tuple of (units, pairs, bucket_stats) DataFrames
+    # - units: all units with match status, subclass, and weights
+    # - pairs: treated-control pairs (PRIMARY OUTPUT for linking outcomes)
+    # - bucket_stats: LSH bucketing statistics for diagnostics
     print(f"\n{subsection_header('Matching')}...")
-    matched = match(features_df, feature_space="euclidean", n_neighbors=10, verbose=False)
-    print_matching_stats(features_df, matched)
+    units, pairs, bucket_stats = match(features_df, feature_space="euclidean", n_neighbors=10, verbose=False)
+    print_matching_stats(features_df, pairs)
 
     # Show sample matched pairs to inspect the matching results
     # Key columns to understand:
@@ -90,7 +94,7 @@ def main():
     #   - treated_k: total matches this treated patient has
     #   - control_usage_count: how many times this control was matched (1 for without replacement)
     print(f"\n{subsection_header('Sample matched pairs')} (5 samples, dataframe transposed for readability):")
-    sample_df = matched.limit(5).toPandas().T
+    sample_df = pairs.limit(5).toPandas().T
     sample_df.columns = [f"Sample {i+1}" for i in range(len(sample_df.columns))]
     print(sample_df.to_string())
 
@@ -104,7 +108,7 @@ def main():
     #
     # The plot (love plot) visualizes balance improvements across all covariates
     print(f"\n{subsection_header('Generating balance summary and plot')}...")
-    summary, fig = match_summary(features_df, matched, sample_frac=1.0, plot=True, verbose=False)
+    summary, fig = match_summary(features_df, units, sample_frac=1.0, plot=True, verbose=False)
     n_covariates = len(summary)
     n_improved = (summary['smd_unadjusted'].abs() > summary['smd_adjusted'].abs()).sum()
     print(f"  Assessed {value(str(n_covariates))} covariates")
@@ -124,48 +128,51 @@ def main():
         )
     print(summary_display.to_string(index=False))
 
-    # Create stratified dataset for outcome analysis
-    # This joins features_df with matched pairs to add strata identifiers:
-    #   - is_matched: indicates if patient was successfully matched
-    #   - strata: unique identifier for each matched pair (format: "id:match_id")
+    # Create analysis-ready dataset by joining match info to original data
+    # The units DataFrame has columns: id, subclass, weight, is_treated
+    # Simply join it to your original data to add match information:
+    #   - subclass: unique identifier for each matched set (treated ID, None if unmatched)
+    #   - weight: weight for analysis (1.0 for treated, 1/k for controls, 0.0 for unmatched)
+    #   - is_treated: boolean treatment indicator
     #
     # Use this DataFrame for outcome analysis (regression, survival, etc.)
-    # The strata column enables stratified/paired analysis respecting the matched structure
-    print(f"\n{subsection_header('Stratifying data for analysis')}...")
-    stratified = stratify_for_plot(features_df, matched)
-    print(f"  {value(str(stratified.count()))} total rows (treated + control)")
+    # The subclass column enables stratified/paired analysis respecting the matched structure
+    print(f"\n{subsection_header('Creating analysis dataset')}...")
+    analysis_df = df.join(units, df["id"] == units["id"], "left").drop(units["id"])
+    n_matched = analysis_df.filter("subclass is not null").count()
+    print(f"  {value(str(analysis_df.count()))} total rows, {value(str(n_matched))} matched")
 
-    # Show sample stratified data to inspect the analysis-ready dataset
-    # Contains all feature columns (with __cat, __num, __id, __treat suffixes) plus strata identifiers
-    # Note: Column names use double underscore notation - see feature generation step above for details
-    print(f"\n{subsection_header('Sample stratified data')} (5 samples, features array column dropped and dataframe transposed for readability):")
-    sample_df = stratified.limit(5).toPandas()
-    # Drop the features column as it's too long for display
-    sample_df = sample_df.drop(columns=['features'], errors='ignore')
-    sample_df = sample_df.T
+    # Show sample analysis data to inspect the analysis-ready dataset
+    # Contains original columns (with original names) plus match information
+    print(f"\n{subsection_header('Sample analysis data')} (5 matched samples, transposed for readability):")
+    sample_df = analysis_df.filter("subclass is not null").limit(5).toPandas().T
     sample_df.columns = [f"Sample {i+1}" for i in range(len(sample_df.columns))]
     print(sample_df.to_string())
 
     # Save all outputs to disk for further analysis
     # File descriptions:
-    #   - matched.csv: PRIMARY OUTPUT - treated-control pairs with pair_weight column
-    #                  Use this to link outcomes and for weighted analysis (e.g., weighted regression)
-    #   - stratified.csv: Analysis-ready dataset with all features plus strata identifiers
-    #                     Use for stratified/paired analysis (e.g., stratified Cox models)
+    #   - pairs.csv: Treated-control pairs with pair_weight for debugging/inspection
+    #   - units.csv: All units with match status, subclass, and weights
+    #                Minimal output - just IDs and match info
+    #   - bucket_stats.csv: LSH bucketing statistics for diagnostics
+    #   - analysis.csv: PRIMARY OUTPUT - original data with match info added
+    #                   Use for outcome analysis (regression, survival, etc.)
     #   - summary.csv: Balance statistics table (SMD, VR, eCDF) before and after matching
-    #                  Use to assess and report matching quality
     #   - balance.png: Love plot visualization of balance improvements
-    #                  Use for visual diagnostics and publication figures
     print(f"\n{subsection_header('Saving outputs')} to {output_dir}/")
     fig.savefig(os.path.join(output_dir, "balance.png"), dpi=150, bbox_inches="tight")
-    matched.toPandas().to_csv(os.path.join(output_dir, "matched.csv"), index=False)
+    pairs.toPandas().to_csv(os.path.join(output_dir, "pairs.csv"), index=False)
+    units.toPandas().to_csv(os.path.join(output_dir, "units.csv"), index=False)
+    bucket_stats.toPandas().to_csv(os.path.join(output_dir, "bucket_stats.csv"), index=False)
     summary.to_csv(os.path.join(output_dir, "summary.csv"), index=False)
-    stratified.toPandas().to_csv(os.path.join(output_dir, "stratified.csv"), index=False)
+    analysis_df.orderBy(F.desc("subclass")).toPandas().to_csv(os.path.join(output_dir, "analysis.csv"), index=False)
 
     print(f"  {highlight('✓')} balance.png - visual balance diagnostic")
-    print(f"  {highlight('✓')} matched.csv - matched pairs with weights")
+    print(f"  {highlight('✓')} pairs.csv - matched pairs")
+    print(f"  {highlight('✓')} units.csv - unit-level match info")
+    print(f"  {highlight('✓')} bucket_stats.csv - LSH bucketing statistics")
     print(f"  {highlight('✓')} summary.csv - balance statistics")
-    print(f"  {highlight('✓')} stratified.csv - analysis-ready dataset")
+    print(f"  {highlight('✓')} analysis.csv - analysis-ready dataset")
 
     spark.stop()
     print(f"\n{highlight('Done!')}")

@@ -123,13 +123,21 @@ Since `match()` now returns the `units` DataFrame directly, `stratify_for_plot()
 - Reduces API surface area
 - The functionality is now built into `match()`
 
-### Decision 4: Keep `match_data()` but simplify it
+### Decision 4: Remove `match_data()` from public API
 
-`match_data()` becomes a convenience function for joining `units` back to the original (pre-features) DataFrame.
+Since `units` is now a simple DataFrame with just `id`, `subclass`, `weight`, `is_treated`, users can easily join it to their original data themselves. The `match_data()` convenience function is no longer needed.
 
 **Rationale**:
-- Users may want to analyze with their original column names
-- Still useful for joining match info to outcome data
+- The join is trivial: `original_df.join(units, on="id", how="left")`
+- Removes unnecessary abstraction
+- Users have full control over the join (column names, join type, etc.)
+- Reduces API surface area
+
+**Example**:
+```python
+# Join match info to original data
+analysis_df = original_df.join(units, original_df["id"] == units["id"], "left").drop(units["id"])
+```
 
 ### Decision 5: Keep `match_summary()` unchanged (mostly)
 
@@ -144,11 +152,11 @@ Since `match()` now returns the `units` DataFrame directly, `stratify_for_plot()
 ### What Changes
 
 1. **`match()` return type**: `DataFrame` → `Tuple[DataFrame, DataFrame, DataFrame]`
-2. **`stratify_for_plot()`**: Remove from public API (keep internally if needed)
-3. **`match_summary()`**: Update to use `units` DataFrame directly
-4. **`match_data()`**: Simplify - now just joins `units` to original data
-5. **All examples**: Update to unpack tuple return
-6. **All tests**: Update assertions for new return type
+2. **`stratify_for_plot()`**: Remove from public API
+3. **`match_data()`**: Remove from public API (users do their own simple join)
+4. **`match_summary()`**: Update to use `units` DataFrame directly
+5. **All examples**: Update to unpack tuple return, show how to join to original data
+6. **All tests**: Update assertions for new return type, remove match_data tests
 
 ### What Stays the Same
 
@@ -165,10 +173,13 @@ The return type change is breaking. Users will need to update their code:
 # Before
 matched = match(features_df, ...)
 stratified = stratify_for_plot(features_df, matched)
+analysis_df = match_data(original_df, matched, id_col="id")
 
 # After
 units, pairs, bucket_stats = match(features_df, ...)
 # units is ready to use directly - no stratify_for_plot() needed
+# Join to original data yourself (simple one-liner):
+analysis_df = original_df.join(units, original_df["id"] == units["id"], "left").drop(units["id"])
 ```
 
 For users who only want the pairs (backward compatibility concern), they can simply ignore the other outputs:

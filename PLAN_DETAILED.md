@@ -311,56 +311,18 @@ stratified_df = stratified_df.withColumnRenamed("subclass", "strata")
 
 The rest of the balance computation should work unchanged since it just looks for a `strata` column.
 
-#### 3.2 Update `match_data()` to use units DataFrame
+#### 3.2 Remove `match_data()` function
 
 **Location**: Lines 304-426
 
-Simplify significantly - now just joins units to original data:
+Delete the entire `match_data()` function. Users can easily join `units` to their original data themselves:
 
 ```python
-def match_data(
-    original_df: DataFrame,
-    units_df: DataFrame,
-    id_col: str,
-) -> DataFrame:
-    """
-    Join match information to original DataFrame for outcome analysis.
-
-    Parameters
-    ----------
-    original_df : DataFrame
-        Original input DataFrame (before generate_features)
-    units_df : DataFrame
-        Units DataFrame from match() output
-    id_col : str
-        Name of the ID column in original_df
-
-    Returns
-    -------
-    DataFrame
-        Original DataFrame with added columns: weight, subclass, matched
-    """
-    # Add matched boolean
-    units_with_matched = units_df.withColumn(
-        "matched", F.col("subclass").isNotNull()
-    )
-
-    # Join to original data
-    result = original_df.join(
-        units_with_matched.select("id", "weight", "subclass", "matched"),
-        original_df[id_col] == units_with_matched["id"],
-        "left"
-    ).drop(units_with_matched["id"])
-
-    # Fill any unjoined rows (shouldn't happen, but defensive)
-    result = result.withColumn(
-        "weight", F.coalesce(F.col("weight"), F.lit(0.0))
-    ).withColumn(
-        "matched", F.coalesce(F.col("matched"), F.lit(False))
-    )
-
-    return result
+# Example: User joins units to their original data
+analysis_df = original_df.join(units, original_df["id"] == units["id"], "left").drop(units["id"])
 ```
+
+The `units` DataFrame has simple, clear columns (`id`, `subclass`, `weight`, `is_treated`) that users can join however they prefer.
 
 #### 3.3 Remove import of stratify_for_plot
 
@@ -383,15 +345,16 @@ Remove or comment out:
 from .features import generate_features
 from .loveplot import love_plot
 from .matching import match
-from .summary import match_summary, match_data
+from .summary import match_summary
 # Remove: from .stratify import stratify_for_plot
+# Remove: match_data (no longer needed)
 
 __version__ = "0.1.0"
 __all__ = [
     "generate_features",
     "match",
     "match_summary",
-    "match_data",
+    # Remove: "match_data",
     # Remove: "stratify_for_plot",
     "love_plot",
 ]
@@ -430,20 +393,24 @@ matched = match(features_df, ...)
 units, pairs, bucket_stats = match(features_df, ...)
 ```
 
-#### 6.3 Remove stratify_for_plot() call
+#### 6.3 Remove stratify_for_plot() call, show joining to original data
 
 ```python
 # OLD:
 stratified = stratify_for_plot(features_df, matched)
+analysis_df = match_data(original_df, matched, id_col="id")
 
 # NEW:
 # No longer needed - units already contains the stratification info
-# For saving stratified data, join units back to features_df if needed
+# Users join units to their original data directly:
+analysis_df = df.join(units, df["id"] == units["id"], "left").drop(units["id"])
+
+# For balance checking with features, join to features_df:
 stratified = features_df.join(
     units.select("id", "subclass", "weight"),
     features_df["id__id"] == units["id"],
     "left"
-).drop("id")
+).drop(units["id"]).withColumnRenamed("subclass", "strata")
 ```
 
 #### 6.4 Update match_summary() call
@@ -463,9 +430,10 @@ summary, fig = match_summary(features_df, units, ...)
 matched.toPandas().to_csv(..., "matched.csv", ...)
 
 # NEW:
-pairs.toPandas().to_csv(..., "pairs.csv", ...)  # Renamed for clarity
-units.toPandas().to_csv(..., "units.csv", ...)
-bucket_stats.toPandas().to_csv(..., "bucket_stats.csv", ...)
+pairs.toPandas().to_csv(..., "pairs.csv", ...)  # Match pairs for debugging
+units.toPandas().to_csv(..., "units.csv", ...)  # Unit-level match info
+bucket_stats.toPandas().to_csv(..., "bucket_stats.csv", ...)  # LSH diagnostics
+analysis_df.toPandas().to_csv(..., "analysis.csv", ...)  # Original data + match info
 ```
 
 #### 6.6 Update print_matching_stats() in example/utils.py
@@ -581,11 +549,11 @@ def test_match_summary_basic(matched_data):
 ## Implementation Order
 
 1. **`brpmatch/matching.py`**: Core changes to return tuple
-2. **`brpmatch/summary.py`**: Update to accept units DataFrame
-3. **`brpmatch/__init__.py`**: Update exports
+2. **`brpmatch/summary.py`**: Update match_summary() to accept units DataFrame, remove match_data()
+3. **`brpmatch/__init__.py`**: Update exports (remove stratify_for_plot, match_data)
 4. **`brpmatch/stratify.py`**: Remove from public API
-5. **Tests**: Update all test files
-6. **Examples**: Update all example files
+5. **Tests**: Update all test files, remove match_data tests
+6. **Examples**: Update all example files, show joining to original data
 
 ## Testing Strategy
 
@@ -598,7 +566,7 @@ def test_match_summary_basic(matched_data):
 
 If issues arise, the changes are isolated to:
 - `matching.py`: Return type change
-- `summary.py`: Parameter type change
-- `__init__.py`: Export list change
+- `summary.py`: Parameter type change, match_data() removal
+- `__init__.py`: Export list change (stratify_for_plot, match_data removed)
 
 These can be reverted independently. Keep `stratify.py` as internal (don't delete) until the refactor is confirmed working.

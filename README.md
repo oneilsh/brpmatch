@@ -76,15 +76,21 @@ Next we perform the matching. To start we'll use the default, 1-to-1 nearest-nei
 
 ```python
 # 2. Match treated to controls
-matched_df = match(features_df)
+units, pairs, bucket_stats = match(features_df)
 ```
 
-The resulting matched dataframe contains information about how patients 
+The `match()` function returns three DataFrames:
+- **units**: One row per patient with match info (id, subclass, weight, is_treated). This is the primary output for analysis.
+- **pairs**: One row per matched pair for inspection/debugging.
+- **bucket_stats**: LSH bucketing diagnostics.
 
 ```python
 # 3. Assess balance (prints summary table and optionally generates love plot)
-summary, fig = match_summary(features_df, matched_df, plot=True)
+summary, fig = match_summary(features_df, units, plot=True)
 fig.savefig("balance.png")
+
+# 4. Join match info to original data for outcome analysis
+analysis_df = df.join(units, df["person_id"] == units["id"], "left").drop(units["id"])
 ```
 
 ## Usage Examples
@@ -96,10 +102,10 @@ Mahalanobis distance accounts for feature correlations.
 
 ```python
 # Euclidean distance (default)
-matched_df = match(features_df, feature_space="euclidean")
+units, pairs, bucket_stats = match(features_df, feature_space="euclidean")
 
 # Mahalanobis distance - whitens features to account for correlations
-matched_df = match(features_df, feature_space="mahalanobis")
+units, pairs, bucket_stats = match(features_df, feature_space="mahalanobis")
 ```
 
 ### Ratio Matching (1-to-k)
@@ -109,17 +115,17 @@ Match each treated patient to multiple controls for increased statistical power.
 ```python
 # 1:3 matching without replacement (default)
 # Each control matched to at most one treated patient
-matched_df = match(features_df, ratio_k=3)
+units, pairs, bucket_stats = match(features_df, ratio_k=3)
 
 # 1:3 matching with replacement
 # Controls can be reused across treated patients
-matched_df = match(features_df, ratio_k=3, with_replacement=True)
+units, pairs, bucket_stats = match(features_df, ratio_k=3, with_replacement=True)
 
 # Limit control reuse
-matched_df = match(features_df, ratio_k=3, with_replacement=True, reuse_max=5)
+units, pairs, bucket_stats = match(features_df, ratio_k=3, with_replacement=True, reuse_max=5)
 
 # Only keep treated patients who got exactly k matches
-matched_df = match(features_df, ratio_k=3, require_k=True)
+units, pairs, bucket_stats = match(features_df, ratio_k=3, require_k=True)
 ```
 
 ### Exact Matching (Pre-Stratification)
@@ -157,13 +163,13 @@ The `match_summary()` function computes balance statistics and optionally genera
 
 ```python
 # Get balance statistics only
-summary = match_summary(features_df, matched_df)
+summary = match_summary(features_df, units)
 
 # Get statistics and love plot
-summary, fig = match_summary(features_df, matched_df, plot=True)
+summary, fig = match_summary(features_df, units, plot=True)
 
 # For large datasets, sample for faster computation
-summary, fig = match_summary(features_df, matched_df, plot=True, sample_frac=0.05)
+summary, fig = match_summary(features_df, units, plot=True, sample_frac=0.05)
 ```
 
 Balance statistics include:
@@ -173,21 +179,20 @@ Balance statistics include:
 
 ### Creating Analysis-Ready Datasets
 
-Use `match_data()` to create weighted datasets for outcome analysis.
+Join the `units` DataFrame to your original data for outcome analysis.
 
 ```python
-from brpmatch import match_data
-
-# Create dataset with ATT weights for outcome analysis
-analysis_df = match_data(df, matched_df, id_col="person_id")
+# The units DataFrame has columns: id, subclass, weight, is_treated
+# Simply join it to your original data:
+analysis_df = df.join(units, df["person_id"] == units["id"], "left").drop(units["id"])
 
 # Columns added:
-#   - weights: ATT estimation weights (0 for unmatched)
-#   - subclass: Match group identifier
-#   - matched: Boolean indicating if row was matched
+#   - subclass: Match group identifier (treated ID for matched, None for unmatched)
+#   - weight: ATT estimation weight (1.0 for treated, 1/k for controls, 0.0 for unmatched)
+#   - is_treated: Boolean treatment indicator
 
-# Use for weighted regression
-matched_only = analysis_df.filter("matched = true")
+# Filter to matched rows for analysis
+matched_only = analysis_df.filter("subclass is not null")
 ```
 
 ## Spark Environments
@@ -222,7 +227,7 @@ from brpmatch import generate_features, match, match_summary
 
 df = spark.table("database.patients")
 features_df = generate_features(spark, df, ...)
-matched_df = match(features_df)
+units, pairs, bucket_stats = match(features_df)
 ```
 
 ### Performance Tips
@@ -289,7 +294,7 @@ At least one of `categorical_cols`, `numeric_cols`, or `date_cols` must be provi
 Performs LSH-based distance matching between treated and control cohorts.
 
 ```python
-matched_df = match(
+units, pairs, bucket_stats = match(
     features_df,                        # Output from generate_features()
     feature_space="euclidean",          # "euclidean" or "mahalanobis"
     n_neighbors=5,                      # Neighbors to consider per bucket
@@ -300,6 +305,11 @@ matched_df = match(
     bucket_length=None,                 # LSH bucket length (auto-computed if None)
     num_hash_tables=4,                  # Number of hash tables
 )
+
+# Returns tuple of three DataFrames:
+# - units: One row per patient (id, subclass, weight, is_treated)
+# - pairs: One row per matched pair (for debugging/inspection)
+# - bucket_stats: LSH bucket statistics (for diagnostics)
 ```
 
 ### `match_summary()`
@@ -308,12 +318,12 @@ Generates balance statistics and optional love plot.
 
 ```python
 # Statistics only
-summary = match_summary(features_df, matched_df)
+summary = match_summary(features_df, units)
 
 # Statistics and plot
 summary, fig = match_summary(
     features_df,
-    matched_df,
+    units,                              # Units DataFrame from match()
     sample_frac=0.05,                   # Sample fraction for large datasets
     plot=True,                          # Generate love plot
     figsize=(10, 12),                   # Figure size
@@ -321,38 +331,23 @@ summary, fig = match_summary(
 )
 ```
 
-### `stratify_for_plot()`
-
-Prepares matched data with strata identifiers.
-
-```python
-stratified_df = stratify_for_plot(features_df, matched_df)
-# Adds: is_matched, strata columns
-```
-
 ### `love_plot()`
 
 Generates love plot directly from stratified data.
 
 ```python
+# First create stratified data by joining units to features
+stratified_df = features_df.join(
+    units.select("id", "subclass", "weight"),
+    features_df["person_id__id"] == units["id"],
+    "left"
+).drop("id").withColumnRenamed("subclass", "strata")
+
 fig = love_plot(
-    stratified_df,                      # Output from stratify_for_plot()
+    stratified_df,
     sample_frac=0.05,                   # Sample fraction
     figsize=(10, 12),                   # Figure size
 )
-```
-
-### `match_data()`
-
-Creates weighted dataset for outcome analysis.
-
-```python
-analysis_df = match_data(
-    original_df,                        # Original input DataFrame
-    matched_df,                         # Output from match()
-    id_col="person_id",                 # ID column name
-)
-# Adds: weights, subclass, matched columns
 ```
 
 ## Development
@@ -384,6 +379,14 @@ Python packages (installed automatically):
 - matplotlib >= 3.5
 
 ## Changelog
+
+### 1.1.0
+- **Breaking change**: `match()` now returns tuple `(units, pairs, bucket_stats)`
+  - `units`: Primary output with one row per patient (id, subclass, weight, is_treated)
+  - `pairs`: Match pairs for inspection/debugging
+  - `bucket_stats`: LSH bucketing diagnostics
+- Removed `match_data()` and `stratify_for_plot()` from public API
+- Users now join `units` DataFrame to their data directly for analysis
 
 ### 1.0.0
 - Initial release

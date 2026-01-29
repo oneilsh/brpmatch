@@ -27,19 +27,20 @@ def matched_data(spark, lalonde_df):
     )
 
     # Match (no id_col parameter - auto-discovered)
-    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5)
+    # match() now returns a tuple of (units, pairs, bucket_stats)
+    units, pairs, bucket_stats = match(features_df, feature_space="euclidean", n_neighbors=5)
 
-    return features_df, matched_df
+    return features_df, units
 
 
 def test_match_summary_basic(matched_data):
     """Test basic match_summary functionality."""
-    features_df, matched_df = matched_data
+    features_df, units = matched_data
 
     # No feature_cols parameter - auto-discovered
     summary_df = match_summary(
         features_df,
-        matched_df,
+        units,
         sample_frac=1.0,
         plot=False,
     )
@@ -54,11 +55,11 @@ def test_match_summary_basic(matched_data):
 
 def test_match_summary_auto_discovers_features(matched_data):
     """Test that match_summary auto-discovers feature columns."""
-    features_df, matched_df = matched_data
+    features_df, units = matched_data
 
     summary_df = match_summary(
         features_df,
-        matched_df,
+        units,
         sample_frac=1.0,
         plot=False,
     )
@@ -70,11 +71,11 @@ def test_match_summary_auto_discovers_features(matched_data):
 
 def test_match_summary_with_plot(matched_data):
     """Test that match_summary can generate plots."""
-    features_df, matched_df = matched_data
+    features_df, units = matched_data
 
     result = match_summary(
         features_df,
-        matched_df,
+        units,
         sample_frac=1.0,
         plot=True,
     )
@@ -94,11 +95,11 @@ def test_match_summary_with_plot(matched_data):
 
 def test_match_summary_display_names(matched_data):
     """Test that match_summary includes display names."""
-    features_df, matched_df = matched_data
+    features_df, units = matched_data
 
     summary_df = match_summary(
         features_df,
-        matched_df,
+        units,
         sample_frac=1.0,
         plot=False,
     )
@@ -110,11 +111,11 @@ def test_match_summary_display_names(matched_data):
 
 def test_match_summary_balance_improvement(matched_data):
     """Test that matching improves balance (reduced SMD)."""
-    features_df, matched_df = matched_data
+    features_df, units = matched_data
 
     summary_df = match_summary(
         features_df,
-        matched_df,
+        units,
         sample_frac=1.0,
         plot=False,
     )
@@ -130,19 +131,19 @@ def test_match_summary_balance_improvement(matched_data):
 
 def test_match_summary_sampling(matched_data):
     """Test that sampling parameter works."""
-    features_df, matched_df = matched_data
+    features_df, units = matched_data
 
     # Should work with different sample fractions
     summary_full = match_summary(
         features_df,
-        matched_df,
+        units,
         sample_frac=1.0,
         plot=False,
     )
 
     summary_sample = match_summary(
         features_df,
-        matched_df,
+        units,
         sample_frac=0.5,
         plot=False,
     )
@@ -153,11 +154,11 @@ def test_match_summary_sampling(matched_data):
 
 def test_match_summary_ecdf_statistics(matched_data):
     """Test that eCDF statistics are computed."""
-    features_df, matched_df = matched_data
+    features_df, units = matched_data
 
     summary_df = match_summary(
         features_df,
-        matched_df,
+        units,
         sample_frac=1.0,
         plot=False,
     )

@@ -14,7 +14,7 @@ from pyspark.sql import DataFrame
 import pyspark.sql.functions as F
 
 from .loveplot import love_plot
-from .stratify import stratify_for_plot
+# from .stratify import stratify_for_plot  # No longer needed
 from .utils import (
     _discover_feature_columns,
     _discover_id_column,
@@ -39,7 +39,7 @@ def _get_column_type(col_name: str) -> str:
 
 def match_summary(
     features_df: DataFrame,
-    matched_df: DataFrame,
+    units_df: DataFrame,
     sample_frac: float = 0.05,
     threshold_smd: float = 0.1,
     threshold_vr: Tuple[float, float] = (0.5, 2.0),
@@ -57,8 +57,8 @@ def match_summary(
     ----------
     features_df : DataFrame
         Output from generate_features()
-    matched_df : DataFrame
-        Output from match()
+    units_df : DataFrame
+        Units DataFrame from match() output (first element of returned tuple)
     sample_frac : float
         Fraction of data to sample (for large datasets). Default 0.05 (5%)
     threshold_smd : float
@@ -102,8 +102,15 @@ def match_summary(
     id_col_base = id_col.replace("__id", "")
     match_id_col = f"match_{id_col_base}"
 
-    # Stratify data for balance computation
-    stratified_df = stratify_for_plot(features_df, matched_df)
+    # Join features_df with units_df directly
+    stratified_df = features_df.join(
+        units_df.select("id", "subclass", "weight"),
+        features_df[id_col] == units_df["id"],
+        "left"
+    ).drop(units_df["id"])
+
+    # Rename subclass to strata for compatibility with existing balance computation
+    stratified_df = stratified_df.withColumnRenamed("subclass", "strata")
 
     # Sample if needed
     if sample_frac < 1.0:
@@ -301,126 +308,3 @@ def _print_sample_sizes(pdf: pd.DataFrame, treatment_col: str, strata_col: str) 
     print(f"  Control: {len(control)} (matched: {len(control_matched)}, unmatched: {len(control) - len(control_matched)})")
 
 
-def match_data(
-    original_df: DataFrame,
-    matched_df: DataFrame,
-    id_col: str,
-) -> DataFrame:
-    """
-    Create a matched dataset with weights for downstream analysis.
-
-    Analogous to R matchit's match.data() function. Computes ATT (Average Treatment
-    Effect on the Treated) weights following the methodology in Greifer (2021) and
-    the MatchIt package.
-
-    Note: These weights estimate ATT, not ATE (Average Treatment Effect). This is
-    inherent to matching: we keep treated units as-is and find similar controls,
-    answering "what would have happened to the treated if they hadn't been treated?"
-    ATT is appropriate when treatment has barriers to participation or when you want
-    to evaluate the effect on those who actually received treatment. For ATE
-    estimation, consider propensity score weighting (IPTW) instead of matching.
-
-    Weight calculation:
-    - Treated units: weight = 1
-    - Control units: weight = sum of 1/k for each match, where k is the number
-      of controls matched to that treated unit (treated_k in matched_df)
-
-    This implements the "stratum propensity score" weighting approach where
-    matched sets define strata, and inverse probability weights are computed
-    based on the proportion of treated units in each stratum.
-
-    References:
-    - https://ngreifer.github.io/blog/matching-weights/
-    - https://kosukeimai.github.io/MatchIt/reference/matchit.html
-
-    Parameters
-    ----------
-    original_df : DataFrame
-        Original input DataFrame (before generate_features)
-    matched_df : DataFrame
-        Output from match()
-    id_col : str
-        Name of the ID column in original_df
-
-    Returns
-    -------
-    DataFrame
-        DataFrame with original columns plus:
-        - weights: ATT estimation weights (see formula above; 0 for unmatched)
-        - subclass: Match group identifier (treated_id for matched pairs)
-        - matched: Boolean indicating if row was matched
-
-    Example
-    -------
-    >>> result = match_data(df, matched_df, id_col="person_id")
-    >>> # Use for weighted regression:
-    >>> result.filter(F.col("matched")).select("outcome", "treatment", "weights", ...)
-    """
-    # Get the match ID column name from matched_df
-    match_id_col = None
-    for c in matched_df.columns:
-        if c.startswith("match_") and c != "match_round":
-            match_id_col = c
-            break
-
-    if match_id_col is None:
-        raise ValueError("Could not find match ID column in matched_df")
-
-    # Extract base ID column name (e.g., "person_id" from "match_person_id")
-    id_col_base = match_id_col.replace("match_", "")
-
-    # Create subclass (match group) identifier
-    # Each treated patient defines a subclass
-    matched_with_subclass = matched_df.withColumn(
-        "subclass", F.col(id_col_base)
-    )
-
-    # ----- Treated patient weights -----
-    # Treated units always receive weight = 1
-    treated_weights = matched_with_subclass.select(
-        F.col(id_col_base).alias("_join_id"),
-        F.lit(1.0).alias("weights"),
-        F.col("subclass"),
-        F.lit(True).alias("matched")
-    ).distinct()
-
-    # ----- Control patient weights -----
-    # Weight = sum of 1/treated_k for each match this control appears in
-    #
-    # For each row in matched_df:
-    #   - treated_k = number of controls matched to that treated unit
-    #   - This control's contribution from this match = 1/treated_k
-    #
-    # If matching with replacement, a control may appear in multiple rows,
-    # so we sum across all matches.
-    #
-    # Example: control C matched to T1 (treated_k=3) and T2 (treated_k=2)
-    #   weight = 1/3 + 1/2 = 5/6
-    control_weights = matched_with_subclass.withColumn(
-        "_weight_contribution", 1.0 / F.col("treated_k")
-    ).groupBy(match_id_col).agg(
-        F.sum("_weight_contribution").alias("weights"),
-        F.first("subclass").alias("subclass"),  # Use first subclass if matched to multiple treated
-        F.lit(True).alias("matched")
-    ).withColumnRenamed(match_id_col, "_join_id")
-
-    # Combine treated and control weights
-    all_weights = treated_weights.unionByName(control_weights)
-
-    # Join with original data
-    result = original_df.join(
-        all_weights,
-        original_df[id_col] == all_weights["_join_id"],
-        "left"
-    ).drop("_join_id")
-
-    # Fill unmatched rows
-    result = result.withColumn(
-        "weights", F.coalesce(F.col("weights"), F.lit(0.0))
-    ).withColumn(
-        "matched", F.coalesce(F.col("matched"), F.lit(False))
-    ).withColumn(
-        "subclass", F.coalesce(F.col("subclass"), F.lit(None))
-    )
-
-    return result

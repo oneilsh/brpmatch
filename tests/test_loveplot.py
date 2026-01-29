@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from pyspark.sql import functions as F
 
-from brpmatch import generate_features, love_plot, match, stratify_for_plot
+from brpmatch import generate_features, love_plot, match
 from brpmatch.utils import compute_smd, compute_variance_ratio
 
 
@@ -29,11 +29,17 @@ def stratified_df(spark, lalonde_df):
         id_col="id",
     )
 
-    # Match (no id_col parameter - auto-discovered)
-    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5)
+    # Match returns (units, pairs, bucket_stats) tuple
+    units, pairs, bucket_stats = match(features_df, feature_space="euclidean", n_neighbors=5)
 
-    # Stratify (no column parameters - auto-discovered)
-    return stratify_for_plot(features_df, matched_df)
+    # Join units to features_df to create stratified data
+    stratified = features_df.join(
+        units.select("id", "subclass", "weight"),
+        features_df["id__id"] == units["id"],
+        "left"
+    ).drop(units["id"]).withColumnRenamed("subclass", "strata")
+
+    return stratified
 
 
 def test_love_plot_returns_figure(stratified_df):
