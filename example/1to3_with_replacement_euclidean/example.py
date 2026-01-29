@@ -14,8 +14,8 @@ from pyspark.sql import functions as F
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from brpmatch import generate_features, match, match_summary
-from utils import create_spark_session, load_lalonde, setup_pandas_display, print_matching_stats
-from utils import section_header, subsection_header, highlight, value
+from example.example_utils import create_spark_session, load_lalonde, setup_pandas_display, print_matching_stats
+from example.example_utils import section_header, subsection_header, highlight, value
 
 setup_pandas_display()
 
