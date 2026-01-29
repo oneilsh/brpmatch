@@ -8,6 +8,8 @@ strata identifiers for computing balance statistics.
 import pyspark.sql.functions as F
 from pyspark.sql import DataFrame
 
+from .utils import _discover_id_column
+
 
 def stratify_for_plot(
     features_df: DataFrame,
@@ -40,10 +42,7 @@ def stratify_for_plot(
     - Matched ID column derived from ID column base name
     """
     # Auto-discover ID column
-    id_cols = [c for c in features_df.columns if c.endswith("__id")]
-    if len(id_cols) != 1:
-        raise ValueError(f"Expected one __id column, found: {id_cols}")
-    id_col = id_cols[0]
+    id_col = _discover_id_column(features_df)
 
     # Derive base name and match column name
     id_col_base = id_col.replace("__id", "")

@@ -24,11 +24,10 @@ def matched_data(spark, lalonde_df):
         treatment_col="treat",
         treatment_value="1",
         id_col="id",
-        verbose=False,
     )
 
     # Match (no id_col parameter - auto-discovered)
-    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5, verbose=False)
+    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5)
 
     return features_df, matched_df
 

@@ -22,7 +22,6 @@ def test_basic_feature_generation(spark, lalonde_df):
         treatment_col="treat",
         treatment_value="1",
         id_col="id",
-        verbose=False,
     )
 
     # Check that required columns exist with new naming convention
@@ -45,7 +44,6 @@ def test_column_naming_convention(spark, lalonde_df):
         treatment_col="treat",
         treatment_value="1",
         id_col="id",
-        verbose=False,
     )
 
     # Check for categorical one-hot columns (should end with __cat)
@@ -79,7 +77,6 @@ def test_exact_match_cols(spark, lalonde_df):
         treatment_value="1",
         exact_match_cols=["married"],
         id_col="id",
-        verbose=False,
     )
 
     # Check that exact_match__group exists and has distinct values
@@ -110,7 +107,6 @@ def test_feature_vector_dimensions(spark, lalonde_df):
         treatment_col="treat",
         treatment_value="1",
         id_col="id",
-        verbose=False,
     )
 
     # Get feature vector size
@@ -136,7 +132,6 @@ def test_treatment_column_creation(spark, lalonde_df):
         treatment_col="treat",
         treatment_value="1",
         id_col="id",
-        verbose=False,
     )
 
     # Check that treat__treat column has 0 and 1 values
@@ -159,7 +154,6 @@ def test_only_categorical_features(spark, lalonde_df):
         treatment_col="treat",
         treatment_value="1",
         id_col="id",
-        verbose=False,
     )
 
     assert "features" in features_df.columns
@@ -182,7 +176,6 @@ def test_only_numeric_features(spark, lalonde_df):
         treatment_col="treat",
         treatment_value="1",
         id_col="id",
-        verbose=False,
     )
 
     assert "features" in features_df.columns
@@ -231,7 +224,6 @@ def test_max_categories_enforcement(spark, lalonde_df):
             treatment_value="1",
             id_col="id",
             max_categories=5,  # Set low threshold
-            verbose=False,
         )
 
 
@@ -250,7 +242,6 @@ def test_max_categories_override(spark, lalonde_df):
         treatment_value="1",
         id_col="id",
         max_categories=100,  # High threshold
-        verbose=False,
     )
 
     assert "features" in features_df.columns
@@ -273,7 +264,6 @@ def test_value_sanitization(spark):
         treatment_col="treat",
         treatment_value=1,
         id_col="id",
-        verbose=False,
     )
 
     # Check that sanitized column names exist
@@ -299,7 +289,6 @@ def test_exact_match_not_in_categorical(spark, lalonde_df):
         treatment_value="1",
         exact_match_cols=["married"],  # Not in categorical_cols
         id_col="id",
-        verbose=False,
     )
 
     # Should have exact match columns

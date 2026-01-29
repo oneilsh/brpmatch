@@ -8,7 +8,7 @@ import pytest
 from pyspark.sql import functions as F
 
 from brpmatch import generate_features, love_plot, match, stratify_for_plot
-from brpmatch.loveplot import _compute_smd, _compute_variance_ratio
+from brpmatch.utils import compute_smd, compute_variance_ratio
 
 
 @pytest.fixture
@@ -27,11 +27,10 @@ def stratified_df(spark, lalonde_df):
         treatment_col="treat",
         treatment_value="1",
         id_col="id",
-        verbose=False,
     )
 
     # Match (no id_col parameter - auto-discovered)
-    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5, verbose=False)
+    matched_df = match(features_df, feature_space="euclidean", n_neighbors=5)
 
     # Stratify (no column parameters - auto-discovered)
     return stratify_for_plot(features_df, matched_df)
@@ -71,7 +70,7 @@ def test_smd_calculation():
     treated = np.array([3.0, 4.0, 5.0, 6.0, 7.0])  # mean=5, var=2.5
     control = np.array([1.0, 2.0, 3.0, 4.0, 5.0])  # mean=3, var=2.5
 
-    smd = _compute_smd(treated, control)
+    smd = compute_smd(treated, control)
 
     # SMD = (5 - 3) / sqrt((2.5 + 2.5) / 2) = 2 / sqrt(2.5) = 1.265
     assert abs(smd - 1.265) < 0.01
@@ -83,7 +82,7 @@ def test_variance_ratio_calculation():
     treated = np.array([1.0, 2.0, 3.0, 4.0, 5.0])  # var = 2.5
     control = np.array([2.5, 2.5, 2.5, 2.5, 2.5])  # var = 0.0
 
-    vr = _compute_variance_ratio(treated, control)
+    vr = compute_variance_ratio(treated, control)
 
     # VR should be inf when control variance is 0
     assert vr == np.inf
@@ -95,7 +94,7 @@ def test_variance_ratio_equal_variance():
     treated = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
     control = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
 
-    vr = _compute_variance_ratio(treated, control)
+    vr = compute_variance_ratio(treated, control)
 
     # VR should be 1.0 when variances are equal
     assert abs(vr - 1.0) < 0.01

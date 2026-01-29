@@ -89,6 +89,7 @@ def _create_onehot_columns(
 def generate_features(
     spark: SparkSession,
     df: DataFrame,
+    id_col: str,
     treatment_col: str,
     treatment_value: str,
     categorical_cols: Optional[List[str]] = None,
@@ -96,9 +97,7 @@ def generate_features(
     date_cols: Optional[List[str]] = None,
     exact_match_cols: Optional[List[str]] = None,
     date_reference: str = "1970-01-01",
-    id_col: str = "person_id",
     max_categories: int = DEFAULT_MAX_CATEGORIES,
-    verbose: bool = True,
 ) -> DataFrame:
     """
     Convert patient data into feature vectors for matching.
@@ -125,6 +124,8 @@ def generate_features(
         Active Spark session
     df : DataFrame
         Input DataFrame with patient data
+    id_col : str
+        Patient identifier column name
     treatment_col : str
         Column name containing treatment/cohort indicator
     treatment_value : str
@@ -141,14 +142,10 @@ def generate_features(
         Categorical columns to use for exact matching stratification. Optional.
     date_reference : str
         Reference date for converting date columns to numeric
-    id_col : str
-        Patient identifier column name
     max_categories : int
         Maximum number of distinct values allowed per categorical column.
         High-cardinality columns (e.g., zip codes) are not suitable for matching.
         Default: 20. Can be increased if needed.
-    verbose : bool
-        If True, print progress information (currently unused, reserved for future)
 
     Returns
     -------
@@ -177,7 +174,7 @@ def generate_features(
     all_cols = categorical_cols + numeric_cols + date_cols
     for col in all_cols:
         if all_cols.count(col) != 1:
-            raise RuntimeError(
+            raise ValueError(
                 f"The column {col} is used multiple times across "
                 "categorical_cols, numeric_cols, and date_cols."
             )
@@ -187,7 +184,7 @@ def generate_features(
         if col not in categorical_cols and col not in all_cols:
             # If exact match col not in categorical_cols, it must be in the DataFrame
             if col not in df.columns:
-                raise RuntimeError(
+                raise ValueError(
                     f"The exact match column '{col}' must be present in the DataFrame."
                 )
 

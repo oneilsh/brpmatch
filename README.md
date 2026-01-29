@@ -2,403 +2,241 @@
 
 Large-scale distance-based cohort matching on Apache Spark.
 
-BRPMatch is a Spark-based cohort matching tool that uses distance-based methods (LSH + k-NN) for large-scale propensity score-like matching.
-
 ## Features
 
 - **Scalable**: Uses Apache Spark for distributed processing of large datasets
 - **Flexible**: Supports categorical, numeric, and date features
 - **Advanced matching**: LSH-based bucketing with k-NN matching within buckets
-- **Distance metrics**: Euclidean and Mahalanobis distance supported
-- **Visualization**: Generates love plots to assess covariate balance
+- **Distance metrics**: Euclidean and Mahalanobis distance
+- **Ratio matching**: 1-to-k matching with or without replacement
+- **Exact matching**: Pre-stratification on categorical variables
+- **Visualization**: Love plots for covariate balance assessment
 
 ## Installation
 
 ```bash
-# Install from PyPI (when published)
 pip install brpmatch
 
-# Install from source
+# Or from source
 git clone https://github.com/yourusername/brpmatch.git
-cd brpmatch
-poetry install
+cd brpmatch && poetry install
+```
+
+### Managed Environments
+
+If you are working in a managed environment where you cannot install packages but can upload files,
+the `dist` directory contains `.zip` archives of the package for import. Upload the archive to the
+working directory of your environment, insert it into `sys.path`, and distribute it to spark executors
+for use as well:
+
+```
+import sys
+
+sys.path.insert(0, "brpmatch.zip")
+import brpmatch
+
+spark.sparkContext.addPyFile("brpmatch.zip")
 ```
 
 ## Quick Start
 
-### Running Locally (No Cluster Needed!)
+You will need a *Spark* data frame with columns indicating:
 
-The `pyspark` package includes everything needed to run Spark on your local machine. No separate cluster or driver VM required!
+*. An ID column indicating individual patients, one per row (e.g. `"person_id"`).
+*. The treatment, which should have two distinct values defining the cohorts that need matching (e.g. a `cohort` column with values `"treated"` and `"control"`).
+*. The treatment value, defining which cohort needs matches (e.g. `"treated"`).
+*. Lists of numeric (e.g. `age`, `bmi`), categorical (e.g. `state` or boolean `smoker`), and/or date columns (e.g. `date_of_vaccination`) to use as matching features. Dates are converted to numeric represenation as days from a reference date (default `1/1/1970`; as these are internally normalized the reference date typically does not matter).
+
+You may also optionally include categorical columns to enforce exact matching on via `exact_cols`.
+
+We start by generating features, which performs one-hot encoding for categorical features, date-to-numeric transformation. 
 
 ```python
-from pyspark.sql import SparkSession
-from brpmatch import generate_features, match, stratify_for_plot, love_plot
+from brpmatch import generate_features, match, match_summary
 
-# Create a local Spark session (runs on your machine)
-# .master("local[*]") uses all available CPU cores locally
+# assuming df contains columns for 
+
+# 1. Generate features
+features_df = generate_features(
+    spark, df,
+    id_col = "person_id",
+    treatment_col="cohort",           # Column with treatment/control labels
+    treatment_value="treated",        # Value indicating treated group
+    categorical_cols=["state", "smoker"],
+    numeric_cols=["age", "bmi"],
+    date_cols=["date_of_vaccination"]
+)
+```
+
+The resulting features dataframe includes these transformed features with derived column names.
+These features are not normalized (normalized versions will be derived for matching), so they may be useful
+for your own modeling purposes as well. It also includes a `features` column with the same information as an array column.
+
+Next we perform the matching. To start we'll use the default, 1-to-1 nearest-neighbor matching in Euclidean space.
+
+```python
+# 2. Match treated to controls
+matched_df = match(features_df)
+```
+
+The resulting matched dataframe contains information about how patients 
+
+```python
+# 3. Assess balance (prints summary table and optionally generates love plot)
+summary, fig = match_summary(features_df, matched_df, plot=True)
+fig.savefig("balance.png")
+```
+
+## Usage Examples
+
+### Distance Metrics
+
+Euclidean distance (default) works well when features are on similar scales.
+Mahalanobis distance accounts for feature correlations.
+
+```python
+# Euclidean distance (default)
+matched_df = match(features_df, feature_space="euclidean")
+
+# Mahalanobis distance - whitens features to account for correlations
+matched_df = match(features_df, feature_space="mahalanobis")
+```
+
+### Ratio Matching (1-to-k)
+
+Match each treated patient to multiple controls for increased statistical power.
+
+```python
+# 1:3 matching without replacement (default)
+# Each control matched to at most one treated patient
+matched_df = match(features_df, ratio_k=3)
+
+# 1:3 matching with replacement
+# Controls can be reused across treated patients
+matched_df = match(features_df, ratio_k=3, with_replacement=True)
+
+# Limit control reuse
+matched_df = match(features_df, ratio_k=3, with_replacement=True, reuse_max=5)
+
+# Only keep treated patients who got exactly k matches
+matched_df = match(features_df, ratio_k=3, require_k=True)
+```
+
+### Exact Matching (Pre-Stratification)
+
+Force matches within groups defined by categorical variables.
+
+```python
+features_df = generate_features(
+    spark, df,
+    treatment_col="cohort",
+    treatment_value="treated",
+    categorical_cols=["state", "smoker"],
+    numeric_cols=["age", "bmi"],
+    exact_match_cols=["gender"],  # Match within same gender only
+)
+```
+
+### Date Features
+
+Convert date columns to numeric (days from reference date) for matching.
+
+```python
+features_df = generate_features(
+    spark, df,
+    treatment_col="cohort",
+    treatment_value="treated",
+    date_cols=["diagnosis_date", "enrollment_date"],
+    date_reference="2020-01-01",  # Default: "1970-01-01"
+)
+```
+
+### Assessing Balance
+
+The `match_summary()` function computes balance statistics and optionally generates a love plot.
+
+```python
+# Get balance statistics only
+summary = match_summary(features_df, matched_df)
+
+# Get statistics and love plot
+summary, fig = match_summary(features_df, matched_df, plot=True)
+
+# For large datasets, sample for faster computation
+summary, fig = match_summary(features_df, matched_df, plot=True, sample_frac=0.05)
+```
+
+Balance statistics include:
+- **SMD (Standardized Mean Difference)**: Goal is |SMD| < 0.1
+- **Variance Ratio**: Goal is VR between 0.5 and 2.0
+- **eCDF statistics**: Mean and max empirical CDF differences
+
+### Creating Analysis-Ready Datasets
+
+Use `match_data()` to create weighted datasets for outcome analysis.
+
+```python
+from brpmatch import match_data
+
+# Create dataset with ATT weights for outcome analysis
+analysis_df = match_data(df, matched_df, id_col="person_id")
+
+# Columns added:
+#   - weights: ATT estimation weights (0 for unmatched)
+#   - subclass: Match group identifier
+#   - matched: Boolean indicating if row was matched
+
+# Use for weighted regression
+matched_only = analysis_df.filter("matched = true")
+```
+
+## Spark Environments
+
+### Local Mode (Development)
+
+Installing `pyspark` includes everything needed. No separate cluster required.
+
+```python
+spark = SparkSession.builder.master("local[*]").getOrCreate()
+```
+
+For Java 17+, add security manager configuration:
+
+```python
 spark = (
     SparkSession.builder
-    .master("local[*]")  # Local mode - no cluster needed!
-    .appName("matching")
+    .master("local[*]")
     .config("spark.driver.extraJavaOptions", "-Djava.security.manager=allow")
     .config("spark.executor.extraJavaOptions", "-Djava.security.manager=allow")
     .getOrCreate()
 )
-
-# Load your data
-df = spark.read.csv("data.csv", header=True, inferSchema=True)
-
-# 1. Generate feature vectors
-features_df = generate_features(
-    spark,
-    df,
-    treatment_col="cohort",
-    treatment_value="treated",
-    categorical_cols=["state", "smoker", "diabetes"],
-    numeric_cols=["age", "bmi"],
-    date_cols=["diagnosis_date"],
-    exact_match_cols=["gender"],           # Pre-stratification
-)
-
-# 2. Perform matching
-matched_df = match(
-    features_df,
-    distance_metric="euclidean",           # or "mahalanobis"
-    n_neighbors=5,
-    bucket_length=2.0,
-)
-
-# 3. Prepare data for visualization
-stratified_df = stratify_for_plot(features_df, matched_df)
-
-# 4. Generate love plot
-feature_cols = ["state_index", "smoker_index", "diabetes_index", "age", "bmi", "diagnosis_date_days_from_2018"]
-fig = love_plot(
-    stratified_df,
-    feature_cols,
-    treatment_col="treat",
-    sample_frac=0.05,
-)
-fig.savefig("balance.png")
 ```
 
-## Understanding Spark Modes
+### Managed Environments (Databricks, EMR, etc.)
 
-BRPMatch works in both **local mode** (single machine) and **cluster mode** (distributed):
-
-### Local Mode (Development/Testing)
-**You already have this!** Installing `pyspark` includes a complete Spark installation.
+The `spark` session is already configured. Just import and use.
 
 ```python
-# Runs on your laptop/workstation
-spark = SparkSession.builder.master("local[*]").getOrCreate()
-```
+# spark is already available
+from brpmatch import generate_features, match, match_summary
 
-- ✓ No cluster setup required
-- ✓ Uses your machine's CPU cores for parallelism
-- ✓ Perfect for development, testing, small datasets (<100K rows)
-- ✓ Same API as cluster mode
-
-**What `.master("local[*]")` means:**
-- `local` = Run Spark locally (not on a cluster)
-- `*` = Use all available CPU cores
-- `local[4]` = Use exactly 4 cores
-
-### Cluster Mode (Production/Large Datasets)
-
-For large-scale matching (millions of patients), connect to an existing Spark cluster:
-
-```python
-# Databricks - spark is already configured
-spark  # Just use the global spark variable
-
-# AWS EMR / standalone cluster
-spark = SparkSession.builder.master("spark://master-node:7077").getOrCreate()
-
-# YARN cluster
-spark = SparkSession.builder.master("yarn").getOrCreate()
-
-# Kubernetes
-spark = SparkSession.builder.master("k8s://https://k8s-master:443").getOrCreate()
-```
-
-**When to use cluster mode:**
-- Datasets with >1M patients
-- Complex features requiring significant computation
-- Production pipelines
-- Need for horizontal scaling
-
-## Usage in Managed Spark Environments
-
-If you're working in an environment where Spark is already running (Databricks, AWS EMR, Palantir Foundry, etc.), you can use the existing `spark` session directly. No need to create or configure a SparkSession.
-
-### Complete Example with Simulated Data
-
-This example creates synthetic patient data and runs the full BRPMatch pipeline. Works in any managed Spark environment (Databricks, EMR, Foundry, etc.) where `spark` is already available.
-
-```python
-# spark is already available in managed environments - no need to create it
-
-# If using the offline zip distribution, add it to the path:
-import sys
-zip_path = '/path/to/brpmatch.zip'  # Update path as needed
-sys.path.insert(0, zip_path)
-# Also add to Spark executors for distributed operations:
-spark.sparkContext.addPyFile(zip_path)
-
-# If installed via pip, just import directly (no sys.path modification needed)
-from brpmatch import generate_features, match, stratify_for_plot, love_plot
-import numpy as np
-import pandas as pd
-
-# Generate synthetic patient data
-np.random.seed(42)
-n_patients = 5000
-
-# Create treated cohort (n=2000)
-treated = pd.DataFrame({
-    'person_id': [f'T{i:04d}' for i in range(2000)],
-    'age': np.random.normal(65, 10, 2000),
-    'bmi': np.random.normal(28, 5, 2000),
-    'state': np.random.choice(['CA', 'NY', 'TX', 'FL'], 2000),
-    'smoker': np.random.choice(['Y', 'N'], 2000, p=[0.3, 0.7]),
-    'diabetes': np.random.choice(['Y', 'N'], 2000, p=[0.4, 0.6]),
-    'gender': np.random.choice(['M', 'F'], 2000),
-    'cohort': ['treated'] * 2000
-})
-
-# Create control cohort (n=3000) - slightly different distributions
-control = pd.DataFrame({
-    'person_id': [f'C{i:04d}' for i in range(3000)],
-    'age': np.random.normal(60, 12, 3000),
-    'bmi': np.random.normal(26, 6, 3000),
-    'state': np.random.choice(['CA', 'NY', 'TX', 'FL'], 3000),
-    'smoker': np.random.choice(['Y', 'N'], 3000, p=[0.2, 0.8]),
-    'diabetes': np.random.choice(['Y', 'N'], 3000, p=[0.3, 0.7]),
-    'gender': np.random.choice(['M', 'F'], 3000),
-    'cohort': ['control'] * 3000
-})
-
-# Combine and convert to Spark DataFrame
-df_pandas = pd.concat([treated, control], ignore_index=True)
-df = spark.createDataFrame(df_pandas)
-
-# Run BRPMatch pipeline
-features_df = generate_features(
-    spark,
-    df,
-    treatment_col='cohort',
-    treatment_value='treated',
-    categorical_cols=['state', 'smoker', 'diabetes'],
-    numeric_cols=['age', 'bmi'],
-    exact_match_cols=['gender'],  # Match within same gender
-)
-
-matched_df = match(
-    features_df,
-    distance_metric='euclidean',
-    n_neighbors=3,
-)
-
-stratified_df = stratify_for_plot(features_df, matched_df)
-
-# Generate and display love plot
-feature_cols = ["state_index", "smoker_index", "diabetes_index", "age", "bmi"]
-fig = love_plot(
-    stratified_df,
-    feature_cols,
-    sample_frac=0.1,
-    figsize=(10, 8)
-)
-
-# Display in notebook (Databricks/Jupyter)
-display(fig)  # or plt.show() or fig.savefig('balance.png')
-```
-
-### Databricks Example
-
-```python
-# spark is already available as a global variable in Databricks notebooks
-from brpmatch import generate_features, match, stratify_for_plot, love_plot
-
-# Load your data (spark is already configured)
-df = spark.table("your_database.patient_cohorts")
-
-# Or read from files
-df = spark.read.parquet("/mnt/data/cohorts/")
-
-# Use BRPMatch functions directly - they work with the existing spark session
-features_df = generate_features(
-    spark,  # Use the existing spark session
-    df,
-    treatment_col="treatment_group",
-    treatment_value="intervention",
-    categorical_cols=["state", "race", "smoker"],
-    numeric_cols=["age", "bmi", "baseline_glucose"],
-    exact_match_cols=["study_site"],  # Match within same site
-)
-
-matched_df = match(features_df, n_neighbors=5)
-stratified_df = stratify_for_plot(features_df, matched_df)
-
-# Generate and display plot in notebook
-feature_cols = ["state_index", "race_index", "smoker_index", "age", "bmi", "baseline_glucose"]
-fig = love_plot(stratified_df, feature_cols, sample_frac=0.1)
-display(fig)  # Databricks display function
+df = spark.table("database.patients")
+features_df = generate_features(spark, df, ...)
+matched_df = match(features_df)
 ```
 
 ### Performance Tips
 
-For large datasets (>10M rows):
 ```python
 # Cache feature DataFrame if reusing
 features_df = generate_features(...).cache()
 
-# Use larger bucket_length for faster matching (but potentially lower quality)
+# Larger bucket_length = faster matching, potentially lower quality
 matched_df = match(features_df, bucket_length=3.0)
 
-# Sample for visualization
-fig = love_plot(stratified_df, feature_cols, sample_frac=0.01)  # Use 1% of data
+# Sample for visualization on large datasets
+summary, fig = match_summary(features_df, matched_df, plot=True, sample_frac=0.01)
 ```
-
-## API Reference
-
-### `generate_features()`
-
-Converts patient data into feature vectors for matching.
-
-**Parameters:**
-- `spark`: Active Spark session
-- `df`: Input DataFrame with patient data
-- `treatment_col`: Column indicating treatment/control status
-- `treatment_value`: Value indicating "treated" group
-- `categorical_cols`: Columns to one-hot encode (optional if numeric_cols or date_cols provided)
-- `numeric_cols`: Columns to treat as numeric (optional if categorical_cols or date_cols provided; must not contain nulls)
-- `date_cols`: Date columns to convert to numeric (optional)
-- `exact_match_cols`: Categorical columns for exact matching stratification (optional; requires categorical_cols)
-- `date_reference`: Reference date for date conversion (default: "2018-01-01")
-- `id_col`: Patient identifier column (default: "person_id")
-
-**Requirements:**
-- At least one of `categorical_cols`, `numeric_cols`, or `date_cols` must be provided
-- If `exact_match_cols` is used, `categorical_cols` must be provided (exact match columns must be categorical)
-
-**Note on Missing Values**: Numeric columns should not contain null values -
-nulls may cause errors in downstream operations. Handle missing data before
-calling this function using PySpark's `df.na.drop()` or `df.na.fill()` methods.
-
-**Returns:** DataFrame with features, treatment indicator, and exact match ID
-
-**Examples:**
-
-```python
-# Example 1: Only categorical features
-features_df = generate_features(
-    spark,
-    df,
-    treatment_col="cohort",
-    treatment_value="treated",
-    categorical_cols=["state", "smoker", "diabetes", "gender"],
-)
-
-# Example 2: Only numeric features
-features_df = generate_features(
-    spark,
-    df,
-    treatment_col="cohort",
-    treatment_value="treated",
-    numeric_cols=["age", "bmi", "baseline_glucose"],
-)
-
-# Example 3: Mixed features (recommended)
-features_df = generate_features(
-    spark,
-    df,
-    treatment_col="cohort",
-    treatment_value="treated",
-    categorical_cols=["state", "smoker", "diabetes"],
-    numeric_cols=["age", "bmi"],
-    date_cols=["diagnosis_date"],
-    exact_match_cols=["gender"],
-)
-```
-
-### `match()`
-
-Performs LSH-based distance matching between treated and control cohorts.
-
-**Parameters:**
-- `features_df`: Output from generate_features()
-- `distance_metric`: "euclidean" or "mahalanobis" (default: "euclidean")
-- `n_neighbors`: Number of neighbors to consider (default: 5)
-- `bucket_length`: Base LSH bucket length (default: auto-computed)
-- `num_hash_tables`: Number of hash tables (default: 4)
-- `num_patients_trigger_rebucket`: Threshold for finer bucketing (default: 10000)
-- `features_col`: Feature vector column name (default: "features")
-- `treatment_col`: Treatment indicator column (default: "treat")
-- `id_col`: Patient ID column (default: "person_id")
-- `exact_match_col`: Exact match column (default: "exact_match_id")
-
-**Returns:** DataFrame with matched pairs and distances
-
-### `stratify_for_plot()`
-
-Prepares matched data for love plot visualization.
-
-**Parameters:**
-- `features_df`: Output from generate_features()
-- `matched_df`: Output from match()
-- `id_col`: Patient ID column (default: "person_id")
-- `match_id_col`: Matched patient ID column (default: "match_person_id")
-
-**Returns:** Features DataFrame with strata identifiers
-
-### `love_plot()`
-
-Generates a love plot showing covariate balance.
-
-**Parameters:**
-- `stratified_df`: Output from stratify_for_plot()
-- `feature_cols`: List of feature columns to include in the plot (both categorical and numeric)
-- `treatment_col`: Treatment indicator column (default: "treat")
-- `strata_col`: Strata identifier column (default: "strata")
-- `sample_frac`: Sampling fraction for large datasets (default: 0.05)
-- `figsize`: Figure size (default: (10, 12))
-
-**Returns:** matplotlib Figure object
-
-## Development
-
-```bash
-# Install development dependencies
-make dev
-
-# Run tests
-make test
-
-# Run tests in fast-fail mode
-make test-quick
-
-# Run example pipeline with lalonde dataset
-make example
-
-# Build package
-make build
-
-# Create offline zip distribution
-make zip
-
-# Clean build artifacts
-make clean
-```
-
-The `make example` command runs the complete BRPMatch pipeline on the included LaLonde dataset, demonstrating:
-- Feature generation from patient data
-- LSH-based matching between treated and control cohorts
-- Stratification for visualization
-- Love plot generation showing covariate balance
-
-Output: Creates `balance_plot.png` showing standardized mean differences and variance ratios before/after matching.
 
 ## Algorithm Details
 
@@ -414,62 +252,151 @@ The algorithm adaptively selects the finest bucket level that keeps bucket size 
 
 ### k-NN Matching
 
-Within each bucket, k-NN is used to find the k most similar control patients for each treated patient. Greedy 1-to-1 matching ensures unique matches.
+Within each bucket, k-NN finds the k most similar controls for each treated patient. Greedy matching ensures unique assignments (without replacement) or tracks reuse (with replacement).
 
 ### Balance Statistics
 
-- **Standardized Mean Difference (SMD)**: `(mean_treated - mean_control) / pooled_std`
-- **Variance Ratio (VR)**: `var_treated / var_control`
+- **SMD**: `(mean_treated - mean_control) / pooled_std`
+- **Variance Ratio**: `var_treated / var_control`
 
-Both statistics are computed before (unadjusted) and after (adjusted) matching.
+Both computed before (unadjusted) and after (adjusted) matching.
+
+## API Summary
+
+### `generate_features()`
+
+Converts patient data into feature vectors for matching.
+
+```python
+features_df = generate_features(
+    spark,                              # Active Spark session
+    df,                                 # Input DataFrame
+    treatment_col="cohort",             # Column with treatment labels
+    treatment_value="treated",          # Value indicating treated group
+    categorical_cols=["a", "b"],        # One-hot encoded
+    numeric_cols=["x", "y"],            # Cast to double (must not contain nulls)
+    date_cols=["d"],                    # Converted to days from reference
+    exact_match_cols=["gender"],        # Pre-stratification groups
+    date_reference="1970-01-01",        # Reference date for date conversion
+    id_col="person_id",                 # Patient identifier
+)
+```
+
+At least one of `categorical_cols`, `numeric_cols`, or `date_cols` must be provided.
+
+### `match()`
+
+Performs LSH-based distance matching between treated and control cohorts.
+
+```python
+matched_df = match(
+    features_df,                        # Output from generate_features()
+    feature_space="euclidean",          # "euclidean" or "mahalanobis"
+    n_neighbors=5,                      # Neighbors to consider per bucket
+    ratio_k=1,                          # Controls per treated patient
+    with_replacement=False,             # Allow control reuse
+    reuse_max=None,                     # Max reuse per control (None = unlimited)
+    require_k=False,                    # Require exactly k matches
+    bucket_length=None,                 # LSH bucket length (auto-computed if None)
+    num_hash_tables=4,                  # Number of hash tables
+)
+```
+
+### `match_summary()`
+
+Generates balance statistics and optional love plot.
+
+```python
+# Statistics only
+summary = match_summary(features_df, matched_df)
+
+# Statistics and plot
+summary, fig = match_summary(
+    features_df,
+    matched_df,
+    sample_frac=0.05,                   # Sample fraction for large datasets
+    plot=True,                          # Generate love plot
+    figsize=(10, 12),                   # Figure size
+    verbose=True,                       # Print summary table
+)
+```
+
+### `stratify_for_plot()`
+
+Prepares matched data with strata identifiers.
+
+```python
+stratified_df = stratify_for_plot(features_df, matched_df)
+# Adds: is_matched, strata columns
+```
+
+### `love_plot()`
+
+Generates love plot directly from stratified data.
+
+```python
+fig = love_plot(
+    stratified_df,                      # Output from stratify_for_plot()
+    sample_frac=0.05,                   # Sample fraction
+    figsize=(10, 12),                   # Figure size
+)
+```
+
+### `match_data()`
+
+Creates weighted dataset for outcome analysis.
+
+```python
+analysis_df = match_data(
+    original_df,                        # Original input DataFrame
+    matched_df,                         # Output from match()
+    id_col="person_id",                 # ID column name
+)
+# Adds: weights, subclass, matched columns
+```
+
+## Development
+
+```bash
+make dev          # Install development dependencies
+make test         # Run tests
+make test-quick   # Run tests in fast-fail mode
+make example      # Run example pipeline with LaLonde dataset
+make build        # Build package
+make zip          # Create offline zip distribution
+make clean        # Clean build artifacts
+```
 
 ## Requirements
 
-### Software
-- **Python** >= 3.10
-- **Java** (required by PySpark - check with `java -version`)
-  - **Local development/testing**: Java 17 recommended
-    - macOS: `brew install openjdk@17`
-    - Linux: `apt install openjdk-17-jdk`
-    - Other: Download from [Adoptium](https://adoptium.net/)
-  - **Managed environments** (Databricks, EMR, Dataproc, etc.): Java version handled automatically
-  - **Note**: Java 23+ has Arrow compatibility issues with PySpark 3.5 - use Java 17 or 21 for local testing
+- **Python** >= 3.12
+- **Java** (for PySpark)
+  - Local development: Java 17 recommended (`brew install openjdk@17`)
+  - Managed environments: Handled automatically
 
-### Python Packages
-All installed automatically with `pip install brpmatch`:
-- PySpark >= 3.3 (includes Spark binaries - no separate Spark installation needed!)
-- PyArrow >= 15.0 (required for Pandas UDFs)
+Python packages (installed automatically):
+- PySpark >= 3.5
+- PyArrow >= 15.0
 - NumPy >= 1.21
 - SciPy >= 1.7
 - scikit-learn >= 1.0
 - pandas >= 1.3
 - matplotlib >= 3.5
 
-**Java Configuration Note**: When running locally (not in managed environments), add these configuration options to your SparkSession:
+## Changelog
 
-```python
-.config("spark.driver.extraJavaOptions", "-Djava.security.manager=allow")
-.config("spark.executor.extraJavaOptions", "-Djava.security.manager=allow")
-```
-
-These options enable certain Java security features required by PySpark and are disabled by default in Java 17+.
+### 1.0.0
+- Initial release
+- LSH-based matching with Euclidean and Mahalanobis distance
+- 1-to-k matching with and without replacement
+- Exact match pre-stratification
+- Love plot visualization
+- Balance statistics (SMD, VR, eCDF)
 
 ## License
 
 MIT License
 
-## Citation
-
-If you use BRPMatch in your research, please cite:
-
-```
-[Citation details to be added]
-```
-
 ## Contributing
 
-Contributions are welcome! Please open an issue or submit a pull request.
-
-## Support
-
-For issues and questions, please open an issue on GitHub.
+Contributions welcome. Please open an issue or submit a pull request.

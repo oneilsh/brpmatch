@@ -13,32 +13,15 @@ import pandas as pd
 from pyspark.sql import DataFrame
 import pyspark.sql.functions as F
 
+from .loveplot import love_plot
 from .stratify import stratify_for_plot
-from .loveplot import love_plot, _compute_smd, _compute_variance_ratio
-
-
-def _discover_feature_columns(df: DataFrame) -> List[str]:
-    """Find all feature columns by suffix pattern."""
-    suffixes = ("__cat", "__num", "__date", "__exact")
-    return [c for c in df.columns if any(c.endswith(s) for s in suffixes)]
-
-
-def _discover_id_column(df: DataFrame) -> str:
-    """Find the ID column by looking for __id suffix."""
-    id_cols = [c for c in df.columns if c.endswith("__id")]
-    if len(id_cols) != 1:
-        raise ValueError(
-            f"Expected exactly one column ending with '__id', found: {id_cols}"
-        )
-    return id_cols[0]
-
-
-def _strip_suffix(col_name: str) -> str:
-    """Strip the __cat, __num, __date, __exact suffix for display."""
-    for suffix in ("__cat", "__num", "__date", "__exact"):
-        if col_name.endswith(suffix):
-            return col_name[:-len(suffix)]
-    return col_name
+from .utils import (
+    _discover_feature_columns,
+    _discover_id_column,
+    _strip_suffix,
+    compute_smd,
+    compute_variance_ratio,
+)
 
 
 def _get_column_type(col_name: str) -> str:
@@ -196,10 +179,10 @@ def _compute_comprehensive_balance(
             "mean_control": np.nanmean(c_vals),
             "mean_treated_adj": np.nanmean(t_vals_adj),
             "mean_control_adj": np.nanmean(c_vals_adj),
-            "smd_unadjusted": _compute_smd(t_vals, c_vals),
-            "smd_adjusted": _compute_smd(t_vals_adj, c_vals_adj),
-            "vr_unadjusted": _compute_variance_ratio(t_vals, c_vals) if not is_binary else np.nan,
-            "vr_adjusted": _compute_variance_ratio(t_vals_adj, c_vals_adj) if not is_binary else np.nan,
+            "smd_unadjusted": compute_smd(t_vals, c_vals),
+            "smd_adjusted": compute_smd(t_vals_adj, c_vals_adj),
+            "vr_unadjusted": compute_variance_ratio(t_vals, c_vals) if not is_binary else np.nan,
+            "vr_adjusted": compute_variance_ratio(t_vals_adj, c_vals_adj) if not is_binary else np.nan,
             "ecdf_mean_unadj": _compute_ecdf_mean(t_vals, c_vals),
             "ecdf_mean_adj": _compute_ecdf_mean(t_vals_adj, c_vals_adj),
             "ecdf_max_unadj": _compute_ecdf_max(t_vals, c_vals),

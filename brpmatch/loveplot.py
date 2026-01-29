@@ -12,13 +12,7 @@ import numpy as np
 import pandas as pd
 from pyspark.sql import DataFrame
 
-
-def _strip_suffix(col_name: str) -> str:
-    """Strip the __cat, __num, __date, __exact suffix for display."""
-    for suffix in ("__cat", "__num", "__date", "__exact"):
-        if col_name.endswith(suffix):
-            return col_name[:-len(suffix)]
-    return col_name
+from .utils import _strip_suffix, compute_smd, compute_variance_ratio
 
 
 def _is_exact_match_column(col_name: str) -> bool:
@@ -232,8 +226,8 @@ def _compute_balance_stats(
     control_matched = matched[matched[treatment_col] == 0]
 
     for col in feature_cols:
-        smd_un = _compute_smd(treated[col].values, control[col].values)
-        smd_adj = _compute_smd(
+        smd_un = compute_smd(treated[col].values, control[col].values)
+        smd_adj = compute_smd(
             treated_matched[col].values, control_matched[col].values
         )
 
@@ -242,8 +236,8 @@ def _compute_balance_stats(
             vr_un = np.nan
             vr_adj = np.nan
         else:
-            vr_un = _compute_variance_ratio(treated[col].values, control[col].values)
-            vr_adj = _compute_variance_ratio(
+            vr_un = compute_variance_ratio(treated[col].values, control[col].values)
+            vr_adj = compute_variance_ratio(
                 treated_matched[col].values, control_matched[col].values
             )
 
@@ -258,26 +252,3 @@ def _compute_balance_stats(
         )
 
     return pd.DataFrame(results)
-
-
-def _compute_smd(treated_values: np.ndarray, control_values: np.ndarray) -> float:
-    """Compute standardized mean difference."""
-    mean_t = np.nanmean(treated_values)
-    mean_c = np.nanmean(control_values)
-    var_t = np.nanvar(treated_values, ddof=1)
-    var_c = np.nanvar(control_values, ddof=1)
-    pooled_std = np.sqrt((var_t + var_c) / 2)
-    if pooled_std == 0:
-        return 0.0
-    return (mean_t - mean_c) / pooled_std
-
-
-def _compute_variance_ratio(
-    treated_values: np.ndarray, control_values: np.ndarray
-) -> float:
-    """Compute variance ratio."""
-    var_t = np.nanvar(treated_values, ddof=1)
-    var_c = np.nanvar(control_values, ddof=1)
-    if var_c == 0:
-        return np.inf if var_t > 0 else 1.0
-    return var_t / var_c

@@ -27,35 +27,11 @@ from pyspark.sql.types import (
 )
 from sklearn.neighbors import NearestNeighbors
 
-
-def _discover_id_column(df: DataFrame) -> str:
-    """Find the ID column by looking for __id suffix."""
-    id_cols = [c for c in df.columns if c.endswith("__id")]
-    if len(id_cols) != 1:
-        raise ValueError(
-            f"Expected exactly one column ending with '__id', found: {id_cols}"
-        )
-    return id_cols[0]
-
-
-def _discover_treatment_column(df: DataFrame) -> str:
-    """Find the treatment column by looking for __treat suffix."""
-    treat_cols = [c for c in df.columns if c.endswith("__treat")]
-    if len(treat_cols) != 1:
-        raise ValueError(
-            f"Expected exactly one column ending with '__treat', found: {treat_cols}"
-        )
-    return treat_cols[0]
-
-
-def _discover_exact_match_column(df: DataFrame) -> str:
-    """Find the exact match grouping column by looking for __group suffix."""
-    group_cols = [c for c in df.columns if c.endswith("__group")]
-    if len(group_cols) != 1:
-        raise ValueError(
-            f"Expected exactly one column ending with '__group', found: {group_cols}"
-        )
-    return group_cols[0]
+from .utils import (
+    _discover_exact_match_column,
+    _discover_id_column,
+    _discover_treatment_column,
+)
 
 
 def match(
@@ -261,11 +237,16 @@ def match(
 
     # Compute bucket length if not provided: N^(-1/d)
     if bucket_length is None:
+        if persons_features_cohorts.count() == 0:
+            raise ValueError("Input DataFrame is empty - no patients to match")
+
         feature_cnt = (
             persons_features_cohorts.limit(1)
             .select(F.size(F.col("feature_array")))
             .collect()[0][0]
         )
+        if feature_cnt == 0:
+            raise ValueError("Feature array is empty - no features to match on")
         # https://spark.apache.org/docs/latest/api/scala/org/apache/spark/ml/feature/BucketedRandomProjectionLSH.html
         # "If input vectors are normalized, 1-10 times of pow(numRecords, -1/inputDim) would be a reasonable value"
         bucket_length = 5 * pow(persons_features_cohorts.count(), (-1 / feature_cnt))
