@@ -99,7 +99,7 @@ def match(
         with_replacement=True. None means unlimited reuse.
     require_k : bool
         If True (default), treated patients who cannot get exactly ratio_k
-        matches are excluded from output. If False, treated patients may
+        matches are marked as unmatched. If False, treated patients may
         receive fewer than ratio_k matches.
 
     Returns

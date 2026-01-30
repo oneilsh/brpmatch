@@ -57,12 +57,8 @@ htmlcov/
 # Jupyter Notebook
 .ipynb_checkpoints
 
-# Poetry
-poetry.lock
-
-# Example outputs
-balance_plot.png
-balance.png
+# Python
+.python-version
 
 # Spark
 derby.log

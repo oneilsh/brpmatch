@@ -2,12 +2,30 @@
 name = "brpmatch"
 version = "1.0.0"
 description = "Large-scale distance-based cohort matching on Apache Spark"
-authors = ["Shawn T O'Neil <shawn@tislab.org>"]
+authors = ["Shawn T O'Neil <shawn@tislab.org>", "Evan French <etfrench@vcu.edu>"]
 license = "MIT"
 readme = "README.md"
+homepage = "https://github.com/oneilsh/brpmatch"
+repository = "https://github.com/oneilsh/brpmatch"
+documentation = "https://github.com/oneilsh/brpmatch#readme"
+keywords = ["matching", "apache-spark", "cohort-matching", "lsh", "nearest-neighbor"]
+  classifiers = [
+      "Development Status :: 4 - Beta",
+      "Intended Audience :: Science/Research",
+      "Intended Audience :: Healthcare Industry",
+      "Topic :: Scientific/Engineering",
+      "Topic :: Scientific/Engineering :: Information Analysis",
+      "Topic :: Scientific/Engineering :: Medical Science Apps.",
+      "License :: OSI Approved :: MIT License",
+      "Programming Language :: Python :: 3",
+      "Programming Language :: Python :: 3 :: Only",
+      "Programming Language :: Python :: 3.10",
+      "Programming Language :: Python :: 3.11",
+      "Programming Language :: Python :: 3.12",
+  ]
 
 [tool.poetry.dependencies]
-python = ">=3.12"
+python = ">=3.10"
 pyspark = ">=3.5,<4.0"
 pyarrow = ">=15.0"
 numpy = ">=1.21"
