@@ -12,10 +12,6 @@ from pyspark.ml import Pipeline
 from pyspark.ml.feature import StandardScaler, VectorAssembler
 from pyspark.sql import DataFrame, SparkSession
 
-# Default maximum categories (can be overridden via parameter)
-DEFAULT_MAX_CATEGORIES = 20
-
-
 def _sanitize_value(value: str) -> str:
     """
     Sanitize a categorical value for use in column names.
@@ -39,7 +35,7 @@ def _create_onehot_columns(
     df: DataFrame,
     col: str,
     suffix: str = "__cat",
-    max_categories: int = DEFAULT_MAX_CATEGORIES,
+    max_categories: int = 20,
 ) -> Tuple[DataFrame, List[str]]:
     """
     Create one-hot encoded columns for a categorical column.
@@ -97,7 +93,7 @@ def generate_features(
     date_cols: Optional[List[str]] = None,
     exact_match_cols: Optional[List[str]] = None,
     date_reference: str = "1970-01-01",
-    max_categories: int = DEFAULT_MAX_CATEGORIES,
+    max_categories: int = 20,
 ) -> DataFrame:
     """
     Convert patient data into feature vectors for matching.

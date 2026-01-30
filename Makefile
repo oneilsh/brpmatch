@@ -17,13 +17,7 @@ help:
 	@echo "  make dev          - Install dev dependencies (including build tools)"
 	@echo "  make test         - Run pytest with local Spark"
 	@echo "  make test-quick   - Run pytest in fast-fail mode"
-	@echo "  make example      - Run all 6 example pipelines"
-	@echo "  make example-1to1-euclidean               - Run 1:1 Euclidean example only"
-	@echo "  make example-1to1-mahalanobis             - Run 1:1 Mahalanobis example only"
-	@echo "  make example-1to3-no-replacement-euclidean    - Run 1:3 no repl Euclidean example only"
-	@echo "  make example-1to3-no-replacement-mahalanobis  - Run 1:3 no repl Mahalanobis example only"
-	@echo "  make example-1to3-with-replacement-euclidean  - Run 1:3 with repl Euclidean example only"
-	@echo "  make example-1to3-with-replacement-mahalanobis - Run 1:3 with repl Mahalanobis example only"
+	@echo "  make example      - Run example pipeline"
 	@echo "  make clean        - Remove build artifacts and example outputs"
 	@echo "  make clean-examples - Remove example outputs only"
 	@echo "  make build        - Build sdist and wheel"
@@ -48,12 +42,6 @@ clean: clean-examples
 
 clean-examples:
 	@echo "Cleaning example outputs..."
-	rm -f example/1to1_euclidean/*.png example/1to1_euclidean/*.csv
-	rm -f example/1to1_mahalanobis/*.png example/1to1_mahalanobis/*.csv
-	rm -f example/1to3_no_replacement_euclidean/*.png example/1to3_no_replacement_euclidean/*.csv
-	rm -f example/1to3_no_replacement_mahalanobis/*.png example/1to3_no_replacement_mahalanobis/*.csv
-	rm -f example/1to3_with_replacement_euclidean/*.png example/1to3_with_replacement_euclidean/*.csv
-	rm -f example/1to3_with_replacement_mahalanobis/*.png example/1to3_with_replacement_mahalanobis/*.csv
 	rm -f example/*.png example/*.csv
 	@echo "Example outputs cleaned"
 
@@ -64,37 +52,9 @@ test-quick:
 	JAVA_HOME=$(JAVA_HOME) poetry run pytest tests/ -v -x --tb=short
 
 example:
-	@echo "Running all BRPMatch examples..."
+	@echo "Running BRPMatch example..."
 	@echo ""
-	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to1_euclidean/example.py
-	@echo ""
-	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to1_mahalanobis/example.py
-	@echo ""
-	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to3_no_replacement_euclidean/example.py
-	@echo ""
-	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to3_no_replacement_mahalanobis/example.py
-	@echo ""
-	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to3_with_replacement_euclidean/example.py
-	@echo ""
-	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to3_with_replacement_mahalanobis/example.py
-
-example-1to1-euclidean:
-	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to1_euclidean/example.py
-
-example-1to1-mahalanobis:
-	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to1_mahalanobis/example.py
-
-example-1to3-no-replacement-euclidean:
-	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to3_no_replacement_euclidean/example.py
-
-example-1to3-no-replacement-mahalanobis:
-	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to3_no_replacement_mahalanobis/example.py
-
-example-1to3-with-replacement-euclidean:
-	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to3_with_replacement_euclidean/example.py
-
-example-1to3-with-replacement-mahalanobis:
-	JAVA_HOME=$(JAVA_HOME) poetry run python example/1to3_with_replacement_mahalanobis/example.py
+	JAVA_HOME=$(JAVA_HOME) poetry run python example/example.py
 
 zip: clean build
 	mkdir -p dist
@@ -107,13 +67,13 @@ build:
 check:
 	poetry run twine check dist/*.whl dist/*.tar.gz
 
-publish-test: build check
+publish-test: build check zip
 	@echo "Publishing to TestPyPI..."
 	# Export env vars so twine picks them up
 	. .env && \
 	TWINE_USERNAME=__token__ TWINE_PASSWORD=$$TEST_PYPI_TOKEN poetry run twine upload --repository testpypi dist/*.whl dist/*.tar.gz --skip-existing
 
-publish: build check
+publish: build check zip
 	@echo "Publishing to PyPI..."
 	. .env && \
 	TWINE_USERNAME=__token__ TWINE_PASSWORD=$$PYPI_TOKEN poetry run twine upload dist/*.whl dist/*.tar.gz --skip-existing

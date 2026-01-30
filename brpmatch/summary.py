@@ -4,7 +4,7 @@ Summary statistics and balance reporting for BRPMatch.
 This module provides MatchIt-style summary output for matched cohorts.
 """
 
-from typing import List, Optional, Tuple, Union
+from typing import List, Tuple
 
 import matplotlib.figure
 import matplotlib.pyplot as plt
@@ -41,17 +41,14 @@ def match_summary(
     features_df: DataFrame,
     units_df: DataFrame,
     sample_frac: float = 0.05,
-    threshold_smd: float = 0.1,
-    threshold_vr: Tuple[float, float] = (0.5, 2.0),
-    plot: bool = False,
     figsize: Tuple[int, int] = (10, 12),
-    verbose: bool = True,
-) -> Union[pd.DataFrame, Tuple[pd.DataFrame, matplotlib.figure.Figure]]:
+    include_ecdf: bool = False,
+) -> Tuple[pd.DataFrame, pd.DataFrame, matplotlib.figure.Figure]:
     """
     Generate MatchIt-style balance summary for matched cohorts.
 
     Computes balance statistics (SMD, Variance Ratio, eCDF) for covariates
-    before and after matching, with optional love plot generation.
+    before and after matching, with love plot generation.
 
     Parameters
     ----------
@@ -61,30 +58,35 @@ def match_summary(
         Units DataFrame from match() output (first element of returned tuple)
     sample_frac : float
         Fraction of data to sample (for large datasets). Default 0.05 (5%)
-    threshold_smd : float
-        Warn if any |SMD| exceeds this threshold. Default 0.1 (MatchIt convention)
-    threshold_vr : Tuple[float, float]
-        Warn if any VR outside this range. Default (0.5, 2.0) (MatchIt convention)
-    plot : bool
-        If True, also generate and return a love plot
     figsize : Tuple[int, int]
-        Figure size if plot=True
-    verbose : bool
-        If True, print balance summary table and sample sizes (default: True)
+        Figure size for the love plot
+    include_ecdf : bool
+        If True, include eCDF statistics in output (default: False)
 
     Returns
     -------
-    pd.DataFrame or Tuple[pd.DataFrame, Figure]
-        Balance summary table with columns:
-        - covariate: feature name
-        - mean_treated, mean_control: group means (unadjusted)
-        - mean_treated_adj, mean_control_adj: group means (adjusted/matched)
-        - smd_unadjusted, smd_adjusted: standardized mean difference
-        - vr_unadjusted, vr_adjusted: variance ratio (continuous vars only)
-        - ecdf_mean_unadj, ecdf_mean_adj: mean eCDF difference
-        - ecdf_max_unadj, ecdf_max_adj: max eCDF difference (KS statistic)
+    Tuple[pd.DataFrame, pd.DataFrame, Figure]
+        Returns (balance_df, aggregate_df, figure).
 
-        If plot=True, returns (summary_df, figure) tuple.
+        balance_df : pd.DataFrame
+            Balance summary table with columns:
+            - display_name: feature name (cleaned)
+            - mean_treated, mean_control: group means (unadjusted)
+            - mean_treated_adj, mean_control_adj: group means (adjusted/matched)
+            - smd_unadjusted, smd_adjusted: standardized mean difference
+            - vr_unadjusted, vr_adjusted: variance ratio (continuous vars only)
+            - ecdf_mean_unadj, ecdf_mean_adj: mean eCDF difference (if include_ecdf=True)
+            - ecdf_max_unadj, ecdf_max_adj: max eCDF difference (if include_ecdf=True)
+
+        aggregate_df : pd.DataFrame
+            Aggregate matching statistics with columns:
+            - statistic: name of the statistic
+            - value: numeric value
+            Includes: cohort sizes before/after matching, match rates,
+            average controls per treated, effective sample sizes, etc.
+
+        figure : matplotlib.figure.Figure
+            Love plot visualization of balance statistics.
 
     Notes
     -----
@@ -125,29 +127,33 @@ def match_summary(
 
     # Compute comprehensive balance statistics
     balance_df = _compute_comprehensive_balance(
-        pdf, feature_cols, treatment_col, strata_col="strata"
+        pdf, feature_cols, treatment_col, strata_col="strata",
+        include_ecdf=include_ecdf
     )
 
     # Add display names and feature types to balance DataFrame
     balance_df["display_name"] = balance_df["covariate"].apply(_strip_suffix)
     balance_df["feature_type"] = balance_df["covariate"].apply(_get_column_type)
 
-    # Print summary table and sample sizes if verbose
-    if verbose:
-        _print_balance_table(balance_df, sample_frac)
-        _print_sample_sizes(pdf, treatment_col, strata_col="strata")
+    # Clean up the returned DataFrame: drop internal columns, reorder with display_name first
+    columns_to_drop = ["covariate", "is_binary", "feature_type"]
+    balance_df = balance_df.drop(columns=columns_to_drop)
+    # Move display_name to first column
+    cols = ["display_name"] + [c for c in balance_df.columns if c != "display_name"]
+    balance_df = balance_df[cols]
 
-    if plot:
-        # Generate love plot using existing infrastructure
-        fig = love_plot(
-            stratified_df,
-            strata_col="strata",
-            sample_frac=1.0,  # Already sampled above
-            figsize=figsize,
-        )
-        return balance_df, fig
+    # Compute aggregate matching statistics
+    aggregate_df = _compute_aggregate_stats(units_df, sample_frac=sample_frac)
 
-    return balance_df
+    # Generate love plot
+    fig = love_plot(
+        stratified_df,
+        strata_col="strata",
+        sample_frac=1.0,  # Already sampled above
+        figsize=figsize,
+    )
+
+    return balance_df, aggregate_df, fig
 
 
 def _compute_comprehensive_balance(
@@ -155,6 +161,7 @@ def _compute_comprehensive_balance(
     feature_cols: List[str],
     treatment_col: str,
     strata_col: str,
+    include_ecdf: bool = False,
 ) -> pd.DataFrame:
     """
     Compute comprehensive balance statistics including eCDF metrics.
@@ -190,12 +197,13 @@ def _compute_comprehensive_balance(
             "smd_adjusted": compute_smd(t_vals_adj, c_vals_adj),
             "vr_unadjusted": compute_variance_ratio(t_vals, c_vals) if not is_binary else np.nan,
             "vr_adjusted": compute_variance_ratio(t_vals_adj, c_vals_adj) if not is_binary else np.nan,
-            "ecdf_mean_unadj": _compute_ecdf_mean(t_vals, c_vals),
-            "ecdf_mean_adj": _compute_ecdf_mean(t_vals_adj, c_vals_adj),
-            "ecdf_max_unadj": _compute_ecdf_max(t_vals, c_vals),
-            "ecdf_max_adj": _compute_ecdf_max(t_vals_adj, c_vals_adj),
             "is_binary": is_binary,
         }
+        if include_ecdf:
+            result["ecdf_mean_unadj"] = _compute_ecdf_mean(t_vals, c_vals)
+            result["ecdf_mean_adj"] = _compute_ecdf_mean(t_vals_adj, c_vals_adj)
+            result["ecdf_max_unadj"] = _compute_ecdf_max(t_vals, c_vals)
+            result["ecdf_max_adj"] = _compute_ecdf_max(t_vals_adj, c_vals_adj)
         results.append(result)
 
     return pd.DataFrame(results)
@@ -256,55 +264,92 @@ def _compute_ecdf_max(treated_values: np.ndarray, control_values: np.ndarray) ->
     return np.max(np.abs(ecdf_t - ecdf_c))
 
 
-def _print_balance_table(balance_df: pd.DataFrame, sample_frac: float) -> None:
-    """Print formatted balance table with clean display names."""
-    sample_note = f" (sampled {sample_frac*100:.0f}% of data)" if sample_frac < 1.0 else ""
-    print(f"\nBalance Summary{sample_note}")
-    print("=" * 100)
+def _compute_aggregate_stats(units_df: DataFrame, sample_frac: float = 1.0) -> pd.DataFrame:
+    """
+    Compute aggregate matching statistics from units DataFrame.
 
-    # Format for display using display_name instead of raw column name
-    display_df = balance_df[
-        ["display_name", "mean_treated", "mean_control", "smd_unadjusted",
-         "smd_adjusted", "vr_unadjusted", "vr_adjusted", "feature_type"]
-    ].copy()
+    Parameters
+    ----------
+    units_df : DataFrame
+        Units DataFrame from match() with columns: id, subclass, weight, is_treated
+    sample_frac : float
+        Fraction of data sampled for analysis (default 1.0 = no sampling)
 
-    # Add indicator for exact match columns
-    display_df["Covariate"] = display_df.apply(
-        lambda row: f"{row['display_name']} (exact)" if row["feature_type"] == "exact" else row["display_name"],
-        axis=1
-    )
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with statistic names and values
+    """
+    # Collect units data for computation
+    units_pdf = units_df.toPandas()
 
-    # Select and rename columns for final display
-    display_df = display_df[
-        ["Covariate", "mean_treated", "mean_control", "smd_unadjusted",
-         "smd_adjusted", "vr_unadjusted", "vr_adjusted"]
-    ].copy()
+    # Split by treatment status
+    treated = units_pdf[units_pdf["is_treated"] == True]  # noqa: E712
+    control = units_pdf[units_pdf["is_treated"] == False]  # noqa: E712
 
-    display_df.columns = [
-        "Covariate", "Mean Treated", "Mean Control",
-        "SMD (Unadj)", "SMD (Adj)", "VR (Unadj)", "VR (Adj)"
+    # Matched = has non-null subclass
+    treated_matched = treated[treated["subclass"].notna()]
+    control_matched = control[control["subclass"].notna()]
+
+    # Cohort sizes
+    n_treated_total = len(treated)
+    n_control_total = len(control)
+    n_treated_matched = len(treated_matched)
+    n_control_matched = len(control_matched)
+    n_treated_unmatched = n_treated_total - n_treated_matched
+    n_control_unmatched = n_control_total - n_control_matched
+
+    # Match rates
+    pct_treated_matched = (n_treated_matched / n_treated_total * 100) if n_treated_total > 0 else 0.0
+    pct_control_matched = (n_control_matched / n_control_total * 100) if n_control_total > 0 else 0.0
+
+    # Average controls per treated (from subclass counts)
+    # Each unique subclass corresponds to one treated patient
+    if n_treated_matched > 0:
+        # Count controls per subclass (treated ID)
+        controls_per_treated = control_matched.groupby("subclass").size()
+        mean_controls_per_treated = controls_per_treated.mean()
+        min_controls_per_treated = controls_per_treated.min()
+        max_controls_per_treated = controls_per_treated.max()
+    else:
+        mean_controls_per_treated = 0.0
+        min_controls_per_treated = 0.0
+        max_controls_per_treated = 0.0
+
+    # Effective Sample Size (ESS) for treated and control
+    # ESS = (sum of weights)^2 / sum of weights^2
+    # For matched units only (weight > 0)
+    treated_weights = treated_matched["weight"].values
+    control_weights = control_matched["weight"].values
+
+    if len(treated_weights) > 0 and np.sum(treated_weights) > 0:
+        effective_sample_size_treated = (np.sum(treated_weights) ** 2) / np.sum(treated_weights ** 2)
+    else:
+        effective_sample_size_treated = 0.0
+
+    if len(control_weights) > 0 and np.sum(control_weights) > 0:
+        effective_sample_size_control = (np.sum(control_weights) ** 2) / np.sum(control_weights ** 2)
+    else:
+        effective_sample_size_control = 0.0
+
+    # Build results DataFrame
+    stats = [
+        ("sample_frac", sample_frac),
+        ("n_treated_total", n_treated_total),
+        ("n_control_total", n_control_total),
+        ("n_treated_matched", n_treated_matched),
+        ("n_control_matched", n_control_matched),
+        ("n_treated_unmatched", n_treated_unmatched),
+        ("n_control_unmatched", n_control_unmatched),
+        ("pct_treated_matched", pct_treated_matched),
+        ("pct_control_matched", pct_control_matched),
+        ("mean_controls_per_treated", mean_controls_per_treated),
+        ("min_controls_per_treated", min_controls_per_treated),
+        ("max_controls_per_treated", max_controls_per_treated),
+        ("effective_sample_size_treated", effective_sample_size_treated),
+        ("effective_sample_size_control", effective_sample_size_control),
     ]
 
-    # Format numeric columns
-    for col in display_df.columns[1:]:
-        display_df[col] = display_df[col].apply(
-            lambda x: f"{x:.4f}" if pd.notna(x) and not np.isinf(x) else "-"
-        )
-
-    print(display_df.to_string(index=False))
-    print("=" * 100)
-
-
-def _print_sample_sizes(pdf: pd.DataFrame, treatment_col: str, strata_col: str) -> None:
-    """Print sample size summary."""
-    treated = pdf[pdf[treatment_col] == 1]
-    control = pdf[pdf[treatment_col] == 0]
-    matched = pdf[pdf[strata_col].notna()]
-    treated_matched = matched[matched[treatment_col] == 1]
-    control_matched = matched[matched[treatment_col] == 0]
-
-    print("\nSample sizes:")
-    print(f"  Treated: {len(treated)} (matched: {len(treated_matched)}, unmatched: {len(treated) - len(treated_matched)})")
-    print(f"  Control: {len(control)} (matched: {len(control_matched)}, unmatched: {len(control) - len(control_matched)})")
+    return pd.DataFrame(stats, columns=["statistic", "value"])
 
 

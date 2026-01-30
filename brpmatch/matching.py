@@ -38,7 +38,7 @@ def match(
     features_df: DataFrame,
     feature_space: Literal["euclidean", "mahalanobis"] = "euclidean",
     n_neighbors: int = 5,
-    bucket_length: Optional[float] = None,
+    bucket_length_multiplier: float = 1.0,
     num_hash_tables: int = 4,
     num_patients_trigger_rebucket: int = 10000,
     features_col: str = "features",
@@ -74,8 +74,10 @@ def match(
     n_neighbors : int
         Number of nearest neighbors to consider per treated patient.
         Should be >= ratio_k to ensure enough candidates.
-    bucket_length : Optional[float]
-        Base bucket length for LSH. If None, computed as N^(-1/d)
+    bucket_length_multiplier : float
+        Multiplier for auto-computed bucket length. Default 1.0.
+        Values > 1.0 create larger buckets (more candidates, slower).
+        Values < 1.0 create smaller buckets (fewer candidates, faster).
     num_hash_tables : int
         Number of hash tables for LSH
     num_patients_trigger_rebucket : int
@@ -255,21 +257,20 @@ def match(
         .withColumn("feature_array", vector_to_array(features_col))
     )
 
-    # Compute bucket length if not provided: N^(-1/d)
-    if bucket_length is None:
-        if persons_features_cohorts.count() == 0:
-            raise ValueError("Input DataFrame is empty - no patients to match")
+    # Compute bucket length: N^(-1/d) * multiplier
+    if persons_features_cohorts.count() == 0:
+        raise ValueError("Input DataFrame is empty - no patients to match")
 
-        feature_cnt = (
-            persons_features_cohorts.limit(1)
-            .select(F.size(F.col("feature_array")))
-            .collect()[0][0]
-        )
-        if feature_cnt == 0:
-            raise ValueError("Feature array is empty - no features to match on")
-        # https://spark.apache.org/docs/latest/api/scala/org/apache/spark/ml/feature/BucketedRandomProjectionLSH.html
-        # "If input vectors are normalized, 1-10 times of pow(numRecords, -1/inputDim) would be a reasonable value"
-        bucket_length = 5 * pow(persons_features_cohorts.count(), (-1 / feature_cnt))
+    feature_cnt = (
+        persons_features_cohorts.limit(1)
+        .select(F.size(F.col("feature_array")))
+        .collect()[0][0]
+    )
+    if feature_cnt == 0:
+        raise ValueError("Feature array is empty - no features to match on")
+    # https://spark.apache.org/docs/latest/api/scala/org/apache/spark/ml/feature/BucketedRandomProjectionLSH.html
+    # "If input vectors are normalized, 1-10 times of pow(numRecords, -1/inputDim) would be a reasonable value"
+    bucket_length = 5 * pow(persons_features_cohorts.count(), (-1 / feature_cnt)) * bucket_length_multiplier
 
     # Create 4 levels of LSH buckets with progressively smaller bucket lengths
     bucket_stages = [
@@ -877,7 +878,7 @@ def _print_match_summary(
     if match_rate < warn_threshold:
         print(
             f"Warning: Low match rate: only {match_rate*100:.1f}% of treated units were matched. "
-            f"Consider adjusting bucket_length or num_hash_tables parameters."
+            f"Consider adjusting bucket_length_multiplier or num_hash_tables parameters."
         )
 
 
